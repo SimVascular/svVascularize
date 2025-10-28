@@ -27,7 +27,7 @@ def smooth_junctions(mesh):
         boundaries = boundaries.split_bodies()
         caps = []
         for boundary in boundaries:
-            cap = remesh_surface_2d(boundary, nosurf=True, hsiz=hsize)
+            cap = remesh_surface_2d(boundary, nosurf=True, hsiz=hsize, nomove=False
             caps.append(cap)
         caps.insert(0, smoothed_mesh)
         model = pyvista.merge(caps)
