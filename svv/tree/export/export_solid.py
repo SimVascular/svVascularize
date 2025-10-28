@@ -320,7 +320,7 @@ def generate_tube(polyline, hsize=None):
     tube = tube.compute_normals(auto_orient_normals=True)
     if isinstance(hsize, type(None)):
         hsize = (min(polyline['radius'])*2*numpy.pi)/25
-    tube = remesh_surface(tube, hsiz=hsize, nomove=False)
+    tube = remesh_surface(tube, hsiz=hsize)
     tube = tube.compute_normals(auto_orient_normals=True)
     fix = pymeshfix.MeshFix(tube)
     fix.repair()
