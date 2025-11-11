@@ -267,22 +267,22 @@ def remesh_surface_2d(boundary, autofix=False, ar=None, hausd=None, hgrad=None, 
         executable_list.extend(["-hmin", str(hmin)])
     if hsiz is not None:
         executable_list.extend(["-hsiz", str(hsiz)])
-    if noinsert is not None:
+    if noinsert:
         executable_list.extend(["-noinsert"])
-    if nomove is not None:
+    if nomove:
         executable_list.extend(["-nomove"])
-    if nosurf is not None:
+    if nosurf:
         executable_list.extend(["-nosurf"])
-    if noswap is not None:
+    if noswap:
         executable_list.extend(["-noswap"])
-    if nr is not None:
+    if nr:
         executable_list.extend(["-nr"])
-    if optim is not None:
+    if optim:
         executable_list.extend(["-optim", str(optim)])
-    if rn is not None:
-        executable_list.extend(["-rn", str(rn)])
-    if nsd is not None:
-        executable_list.extend(["-nsd", str(nsd)])
+    if rn:
+        executable_list.extend(["-rn"])
+    if nsd:
+        executable_list.extend(["-nsd"])
     if verbosity == 0:
         try:
             subprocess.check_call(executable_list, stdout=devnull, stderr=devnull)
@@ -473,20 +473,20 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         executable_list.extend(["-hmin", str(hmin)])
     if hsiz is not None:
         executable_list.extend(["-hsiz", str(hsiz)])
-    if noinsert is not None:
+    if noinsert:
         executable_list.extend(["-noinsert"])
-    if nomove is not None:
+    if nomove:
         executable_list.extend(["-nomove"])
-    if nosurf is not None:
+    if nosurf:
         executable_list.extend(["-nosurf"])
-    if noswap is not None:
+    if noswap:
         executable_list.extend(["-noswap"])
-    if nr is not None:
+    if nr:
         executable_list.extend(["-nr"])
     if optim:
         executable_list.extend(["-optim"])
-    if rn is not None:
-        executable_list.extend(["-rn", str(rn)])
+    if rn:
+        executable_list.extend(["-rn"])
     if verbosity == 0:
         try:
             subprocess.check_call(executable_list, stdout=devnull, stderr=devnull)
@@ -637,20 +637,20 @@ def remesh_volume(pv_unstructured_mesh, auto=True, ar=None, hausd=None, hgrad=No
         executable_list.extend(["-hmin", str(hmin)])
     if hsiz is not None:
         executable_list.extend(["-hsiz", str(hsiz)])
-    if noinsert is not None:
+    if noinsert:
         executable_list.extend(["-noinsert"])
-    if nomove is not None:
+    if nomove:
         executable_list.extend(["-nomove"])
-    if nosurf is not None:
+    if nosurf:
         executable_list.extend(["-nosurf"])
-    if noswap is not None:
+    if noswap:
         executable_list.extend(["-noswap"])
-    if nr is not None:
+    if nr:
         executable_list.extend(["-nr"])
-    if optim is not None:
-        executable_list.extend(["-optim", str(optim)])
-    if rn is not None:
-        executable_list.extend(["-rn", str(rn)])
+    if optim:
+        executable_list.extend(["-optim"])
+    if rn:
+        executable_list.extend(["-rn"])
     if verbosity == 0:
         try:
             subprocess.check_call(executable_list, stdout=devnull, stderr=devnull)
