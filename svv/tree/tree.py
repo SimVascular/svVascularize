@@ -586,12 +586,18 @@ class Tree(object):
         Returns
         -------
         centerlines : pyvista.PolyData
-            Centerline polydata with radius and section-area arrays.
+            Centerline polydata with radius, section-area, and
+            ``BoundaryType`` arrays (0 = interior, 1 = inlet, 2 = outlet).
         polys : list[pyvista.PolyData]
             Per-branch polylines used to construct the merged centerline set.
+        boundary_points : list[dict]
+            Each dict has keys ``type`` ('inlet'/'outlet'), ``point``
+            (3-element array) and ``radius`` (float).
         """
-        centerlines, polys = build_centerlines(self, points_per_unit_length=points_per_unit_length)
-        return centerlines, polys
+        centerlines, polys, boundary_points = build_centerlines(
+            self, points_per_unit_length=points_per_unit_length,
+        )
+        return centerlines, polys, boundary_points
 
 
     def export_gcode(self):

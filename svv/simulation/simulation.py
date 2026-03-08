@@ -740,7 +740,7 @@ class Simulation(object):
         else:
             raise ValueError("Too many positional input arguments")
         if isinstance(self.synthetic_object, svv.tree.tree.Tree):
-            centerlines, _ = self.synthetic_object.export_centerlines()
+            centerlines, *_ = self.synthetic_object.export_centerlines()
             material = one_d_parameters.MaterialModel()
             params = one_d_parameters.Parameters()
             params.output_directory = self.file_path + os.sep + "fluid" + os.sep + "1d"

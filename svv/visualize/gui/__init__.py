@@ -3,6 +3,14 @@ import sys
 
 # CRITICAL: Set GL environment BEFORE any Qt/VTK imports
 # This must happen at module import time
+
+# macOS: force layer-backed views to prevent OpenGL context deadlocks.
+# On Apple Silicon (especially under conda), VTK's render-window initialization
+# can hang indefinitely when Qt tries to negotiate the GL surface with Cocoa.
+# QT_MAC_WANTS_LAYER=1 switches Qt to CALayer-backed rendering which avoids this.
+if sys.platform == 'darwin':
+    os.environ.setdefault('QT_MAC_WANTS_LAYER', '1')
+
 if sys.platform.startswith('linux'):
     # If running on Wayland but lack the plugin, fall back to xcb early
     if 'WAYLAND_DISPLAY' in os.environ and not os.environ.get('QT_QPA_PLATFORM'):
