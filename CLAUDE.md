@@ -79,6 +79,35 @@ Performance-critical code has Cython implementations (`.pyx` files) alongside pu
 - **PySide6**: Qt GUI framework.
 - **TetGen**: Tetrahedral mesh generation.
 
+## Performance Optimizations
+
+### Forest Connection Pipeline (`svv/forest/connect/`)
+The forest connection pipeline (`forest.connect()`) was the primary bottleneck. Optimizations:
+- **Geodesic caching** (`geodesic.py`): Dijkstra result cache per source node + vectorized edge extraction from tetrahedra
+- **Assignment deduplication** (`assign.py`): Deduplicated (i,j) terminal pairs before geodesic computation, removed deepcopy
+- **Constraint sharing** (`base_connection.py`): All 4 constraint functions share a cached curve evaluation per optimizer iteration (was rebuilding 4×). Reduced sampling: curvature 100→50, boundary 100→40
+- **Segment distance vectorization** (`c_distance.py`): Full numpy vectorized pairwise computation, scalar fallback only for degenerate/parallel cases
+- **Bezier vectorization** (`bezier.py`): Vectorized De Casteljau evaluates all t values simultaneously
+- **CatmullRom vectorization** (`catmullrom.py`): Batched evaluation per segment using `np.outer`
+- **deepcopy removal**: Replaced `deepcopy` with `list()`, `.copy()`, or fresh allocation across `bifurcation.py`, `vessel_connection.py`, `tree.py`, `assign.py`
+
+### Import/Meshing Pipeline
+- **Skip contour() for imported meshes** (`domain.py:get_boundary`): When `original_boundary` exists (STL/VTP import), skip expensive contour() call
+- **In-process TetGen** (`tetrahedralize.py`): Call TetGen directly instead of spawning a subprocess. Falls back to subprocess on failure
+- **ConvexHull instead of delaunay_3d** (`domain.py:get_interior`): `scipy.spatial.ConvexHull` replaces expensive `pv.delaunay_3d()`
+- **Single cKDTree** (`domain.py:get_interior`, `dmn.py`): Reuse `mesh_tree` cKDTree for radius queries instead of building a separate BallTree
+- **Vectorized evaluate_fast** (`domain.py`): Batch index filling by unique lengths instead of Python for loop
+- **Cached normalize_scale** (`domain.py`): Pre-computed in `build()`, cached as `_normalize_scale`
+
+## macOS Rendering Fixes
+
+The VTK/Qt visualization had critical issues on macOS Apple Silicon + conda:
+- **Offscreen rendering** (`vtk_widget.py`): Uses offscreen VTK rendering with blit-to-QLabel approach, bypassing `QtInteractor` deadlock that caused GUI hangs
+- **Ray-cast picking** (`vtk_widget.py`): Implements software ray-cast picking for offscreen mode since VTK hardware picker segfaults without an on-screen OpenGL context
+- **Export toolbar** (`main_window.py`): Connected Export button to popup menu with all export options
+- **Forest centerline export** (`forest.py`): Added `Forest.export_centerlines()` for centerline export on Forest objects
+- **Centerline metadata** (`export_centerlines.py`): Added `BoundaryType` array, `boundary_points`, and inlet/outlet companion file to splines export
+
 ## Platform Notes
 
 The codebase has extensive platform detection (Linux/macOS/Windows) particularly around:

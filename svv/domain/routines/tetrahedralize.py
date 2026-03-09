@@ -87,6 +87,99 @@ def _run_tetgen(surface_mesh):
     nodes, elems = tgen.tetrahedralize(verbose=0)
     return nodes, elems
 
+def _tetrahedralize_subprocess(surface, *tet_args,
+                                worker_script=None,
+                                python_exe=None,
+                                **tet_kwargs):
+    """Subprocess fallback for TetGen crash isolation."""
+    if worker_script is None:
+        worker_script = dirpath + os.sep + "tetgen_worker.py"
+    if python_exe is None:
+        python_exe = sys.executable
+
+    tmp_root = None
+    if os.name == "nt":
+        for env_var in ("TEMP", "TMP"):
+            candidate = os.environ.get(env_var)
+            if candidate and os.path.isdir(candidate):
+                tmp_root = candidate
+                break
+
+    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
+        surface_path = os.path.join(tmpdir, "surface.vtp")
+        out_path = os.path.join(tmpdir, "tet.npz")
+        config_path = os.path.join(tmpdir, "config.json")
+
+        cfg = {
+            "args": list(tet_args),
+            "kwargs": tet_kwargs,
+        }
+        with open(config_path, "w") as f:
+            json.dump(cfg, f)
+
+        surface.save(surface_path)
+
+        cmd = [python_exe, worker_script, surface_path, out_path, config_path]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        show_spinner = sys.stdout.isatty()
+        if show_spinner:
+            spinner = _spinner_cycle()
+            start_time = time.time()
+
+            sys.stdout.write("TetGen meshing| ")
+            sys.stdout.flush()
+
+            while proc.poll() is None:
+                elapsed = time.time() - start_time
+                elapsed_str = format_elapsed(elapsed)
+
+                spin_char = next(spinner)
+                left = f"TetGen meshing| {spin_char}"
+
+                try:
+                    width = shutil.get_terminal_size(fallback=(80, 20)).columns
+                except Exception:
+                    width = 80
+
+                min_gap = 1
+                total_len = len(left) + min_gap + len(elapsed_str)
+                if total_len <= width:
+                    spaces = width - len(left) - len(elapsed_str)
+                else:
+                    spaces = min_gap
+
+                line = f"{left}{' ' * spaces}{elapsed_str}"
+                sys.stdout.write("\r" + line)
+                sys.stdout.flush()
+
+                time.sleep(0.1)
+
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        else:
+            proc.wait()
+
+        stdout, stderr = proc.communicate()
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"TetGen worker failed with code {proc.returncode}\n"
+                f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+            )
+
+        with np.load(out_path) as data:
+            nodes = data["nodes"]
+            elems = data["elems"]
+
+    return nodes, elems
+
 def tetrahedralize(surface: pv.PolyData,
                    *tet_args,
                    worker_script: str = dirpath+os.sep+"tetgen_worker.py",
@@ -112,110 +205,17 @@ def tetrahedralize(surface: pv.PolyData,
     """
     tet_kwargs.setdefault("verbose", 0)
 
-    # On Windows, `tempfile` honors TMPDIR, which may be set to a POSIX-style
-    # path such as '/tmp' and is not a valid directory there. Prefer the
-    # standard TEMP/TMP locations when available to avoid spurious
-    # "[WinError 267] The directory name is invalid" errors.
-    tmp_root = None
-    if os.name == "nt":
-        for env_var in ("TEMP", "TMP"):
-            candidate = os.environ.get(env_var)
-            if candidate and os.path.isdir(candidate):
-                tmp_root = candidate
-                break
-
-    with tempfile.TemporaryDirectory(dir=tmp_root) as tmpdir:
-        surface_path = os.path.join(tmpdir, "surface.vtp")
-        out_path = os.path.join(tmpdir, "tet.npz")
-        config_path = os.path.join(tmpdir, "config.json")
-
-        cfg = {
-            "args": list(tet_args),
-            "kwargs": tet_kwargs,
-        }
-        with open(config_path, "w") as f:
-            json.dump(cfg, f)
-
-        # Save the surface mesh so the worker can read it
-        surface.save(surface_path)
-
-        # Command: call the worker script as a separate Python process
-        cmd = [python_exe, worker_script, surface_path, out_path, config_path]
-
-        # Start the worker process
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,   # decode to strings
+    # Try in-process TetGen first (avoids subprocess overhead: save/load/spawn)
+    try:
+        nodes, elems = _run_tetgen(surface)
+    except Exception:
+        # Fall back to subprocess worker for crash isolation
+        nodes, elems = _tetrahedralize_subprocess(
+            surface, *tet_args,
+            worker_script=worker_script,
+            python_exe=python_exe,
+            **tet_kwargs
         )
-
-        show_spinner = sys.stdout.isatty()
-        if show_spinner:
-            spinner = _spinner_cycle()
-            start_time = time.time()
-
-            # Print label once
-            sys.stdout.write("TetGen meshing| ")
-            sys.stdout.flush()
-
-            # Live spinner loop
-            while proc.poll() is None:
-                # Compute elapsed time
-                elapsed = time.time() - start_time
-                elapsed_str = format_elapsed(elapsed)
-
-                # Build left side message
-                spin_char = next(spinner)
-                left = f"TetGen meshing| {spin_char}"
-
-                # Get terminal width (fallback if IDE doesn't report it)
-                try:
-                    width = shutil.get_terminal_size(fallback=(80, 20)).columns
-                except Exception:
-                    width = 80
-
-                # Compute spacing so elapsed time is right-aligned
-                # We'll always keep at least one space between left and right
-                min_gap = 1
-                total_len = len(left) + min_gap + len(elapsed_str)
-                if total_len <= width:
-                    spaces = width - len(left) - len(elapsed_str)
-                else:
-                    # If line is longer than terminal, don't try to be clever; just put a single space
-                    spaces = min_gap
-
-                line = f"{left}{' ' * spaces}{elapsed_str}"
-
-                # '\r' to return to the start of the same line and overwrite
-                sys.stdout.write("\r" + line)
-                sys.stdout.flush()
-
-                time.sleep(0.1)
-
-            # Finish line
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-        else:
-            # Non-interactive environment (e.g., CI): just wait for the
-            # worker process to finish without a live spinner to avoid
-            # any potential overhead from frequent stdout updates.
-            proc.wait()
-
-        # Collect output (so the pipes don't hang)
-        stdout, stderr = proc.communicate()
-
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"TetGen worker failed with code {proc.returncode}\n"
-                f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
-            )
-
-        # Load results and ensure the file handle is closed before the
-        # temporary directory is cleaned up (important on Windows).
-        with np.load(out_path) as data:
-            nodes = data["nodes"]
-            elems = data["elems"]
 
     if elems.min() == 1:
         elems = elems - 1

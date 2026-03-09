@@ -324,7 +324,8 @@ class Tree(object):
                     #_, counts = np.unique(self.vessel_map[key]['downstream'], return_counts=True)
                     #assert np.all(counts == 1), "Fail in appending downstream idxs"
                 else:
-                    self.vessel_map[key] = deepcopy(new_vessel_map[key])
+                    self.vessel_map[key] = {'upstream': list(new_vessel_map[key]['upstream']),
+                                             'downstream': list(new_vessel_map[key]['downstream'])}
             end_chunk_4_3 = perf_counter()
             self.times['chunk_4_3'].append(end_chunk_4_3 - start_chunk_4_3)
             #self.vessel_map = ChainMap(new_vessel_map, self.vessel_map)
