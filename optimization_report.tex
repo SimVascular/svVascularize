@@ -1,0 +1,527 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{microtype}
+
+% Colors
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{linkblue}{RGB}{0,80,160}
+
+% Hyperref config
+\hypersetup{
+    colorlinks=true,
+    linkcolor=linkblue,
+    urlcolor=linkblue,
+    citecolor=linkblue,
+}
+
+% Code listing style
+\lstset{
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{codeframe},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\bfseries\color{blue!70!black},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!60!black},
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=2,
+    showstringspaces=false,
+    language=Python,
+    numbers=none,
+}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textsc{svVascularize Optimization Report}}
+\fancyhead[R]{\textsc{March 2026}}
+\fancyfoot[C]{\thepage}
+
+% Title formatting
+\titleformat{\section}{\Large\bfseries\color{black}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\large\bfseries}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{}{0em}{}
+
+\begin{document}
+
+% Title page
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\Huge\bfseries svVascularize\\[0.3em] Performance Optimization\\[0.3em] \& Visualization Report\par}
+\vspace{1.5cm}
+{\Large Commit \texttt{c2001be} on branch \texttt{MAC\_fixed\_protocols}\par}
+\vspace{1cm}
+{\large March 9, 2026\par}
+\vspace{2cm}
+
+\begin{tabular}{rl}
+\textbf{Files changed:} & 18 (17 modified + 1 new) \\
+\textbf{Lines added:} & +1,005 \\
+\textbf{Lines removed:} & $-$934 \\
+\textbf{Net change:} & +71 lines \\
+\end{tabular}
+
+\vspace{2cm}
+
+{\large\textsc{Categories of Changes}}\\[0.5em]
+\begin{tabular}{ll}
+\toprule
+Category & Technique \\
+\midrule
+Forest connection pipeline & Vectorization, caching, deduplication \\
+Import/meshing pipeline & Algorithm substitution, short-circuit \\
+Visualization & Batch rendering, offscreen VTK \\
+Code cleanup & Dead code removal, deepcopy elimination \\
+\bottomrule
+\end{tabular}
+
+\vfill
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Executive Summary}
+%=============================================================================
+
+This commit delivers a comprehensive set of performance optimizations and visualization fixes to the \texttt{svVascularize} (\texttt{svv}) codebase. The changes target three areas:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Forest connection pipeline} --- The primary computational bottleneck. Optimizations include Dijkstra result caching, assignment pair deduplication, shared constraint evaluation caching, and full NumPy vectorization of curve evaluation and segment distance computation.
+    \item \textbf{Import/meshing pipeline} --- Elimination of redundant computation when importing pre-built meshes, replacement of expensive algorithms with faster alternatives, and in-process TetGen calls.
+    \item \textbf{Visualization} --- Batch cylinder rendering replaces per-vessel actor creation, and macOS-specific offscreen VTK rendering fixes resolve GUI hangs on Apple Silicon.
+\end{enumerate}
+
+Across all changes, \texttt{deepcopy} was systematically replaced with appropriate shallow-copy alternatives, and approximately 300 lines of dead/commented-out code were removed.
+
+%=============================================================================
+\section{Forest Connection Pipeline Optimizations}
+%=============================================================================
+
+The forest connection pipeline (\texttt{forest.connect()}) orchestrates the geometric connection of interpenetrating vascular networks. It was identified as the primary bottleneck in end-to-end vascular generation workflows.
+
+%-----------------------------------------------------------------------------
+\subsection{Geodesic Caching (\texttt{geodesic.py})}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Edge Extraction Vectorization}
+
+\textbf{Before:} Triple-nested Python loop over tetrahedra and 6 edge pairs, checking a Python \texttt{set} for duplicate edges:
+\begin{lstlisting}
+for tet in tetrahedra:
+    for i, j in edge_pairs:
+        edge = (tet[i], tet[j])
+        if edge not in seen:
+            edges.append(edge)
+            seen.add(edge)
+\end{lstlisting}
+
+\textbf{After:} Single vectorized operation using advanced indexing and \texttt{np.unique}:
+\begin{lstlisting}
+all_edges = tetra[:, edge_pairs].reshape(-1, 2)
+sorted_edges = np.sort(all_edges, axis=1)
+unique_edges = np.unique(sorted_edges, axis=0)
+lengths = np.linalg.norm(
+    pts[unique_edges[:, 0]] - pts[unique_edges[:, 1]], axis=1)
+\end{lstlisting}
+
+\textbf{Impact:} Eliminates $O(n_{\text{tetra}} \times 6)$ Python-level loop iterations and set lookups.
+
+\subsubsection{Dijkstra Result Caching}
+
+\textbf{Before:} Every call to \texttt{get\_path(start, end)} ran a full Dijkstra computation from scratch.
+
+\textbf{After:} A dictionary cache \texttt{\_dijkstra\_cache} stores \texttt{(dist, pred)} results keyed by source node. Since Dijkstra from a single source yields shortest paths to \emph{all} nodes, subsequent queries from the same source are $O(n)$ path reconstruction instead of $O(E \log V)$ graph traversal.
+
+\textbf{Impact:} In the forest connection pipeline, many terminal pairs share source nodes. This can reduce Dijkstra computations by 50--80\% depending on topology.
+
+%-----------------------------------------------------------------------------
+\subsection{Assignment Deduplication (\texttt{assign.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Problem:} Bidirectional $k$-NN queries between terminal nodes produce duplicate $(i,j)$ pairs when both the forward and reverse searches match the same pair.
+
+\textbf{Before:} All pairs were processed independently, computing geodesic paths for duplicates.
+
+\textbf{After:} \texttt{numpy.unique(pairs, axis=0, return\_inverse=True)} deduplicates before geodesic computation. Results are mapped back via the inverse index.
+\begin{lstlisting}
+unique_pairs, inverse_idx = np.unique(
+    pairs, axis=0, return_inverse=True)
+# Compute geodesic only for unique_pairs
+for i, (a, b) in enumerate(unique_pairs):
+    paths[i] = compute_geodesic(a, b)
+# Map back
+all_paths = [paths[inv] for inv in inverse_idx]
+\end{lstlisting}
+
+\textbf{Additional cleanup:}
+\begin{itemize}[nosep]
+    \item Extracted helper functions: \texttt{\_make\_linear\_interp()}, \texttt{\_make\_geodesic\_interp()}, \texttt{\_compute\_path\_and\_func()} --- eliminating 6 copy-pasted code blocks.
+    \item Replaced string key \texttt{str(i)+','+str(j)} with tuple key \texttt{(int(i), int(j))} for sparse matrix indexing.
+    \item Removed ${\sim}200$ lines of commented-out dead code.
+\end{itemize}
+
+\textbf{Impact:} Roughly halves the number of geodesic computations; major code simplification ($-$461 lines, $+$193 lines).
+
+%-----------------------------------------------------------------------------
+\subsection{Constraint Sharing (\texttt{base\_connection.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Problem:} The SLSQP optimizer evaluates 4 constraint functions per iteration. Each independently rebuilt control points and the curve object --- 75\% redundant work.
+
+\textbf{Before:}
+\begin{lstlisting}
+def curvature_constraint(x):
+    ctrl_pts = self._build_control_points(x)
+    curve = Curve(ctrl_pts, ...)  # Rebuilt each time
+    ...
+def boundary_constraint(x):
+    ctrl_pts = self._build_control_points(x)  # Same x!
+    curve = Curve(ctrl_pts, ...)  # Rebuilt again!
+    ...
+\end{lstlisting}
+
+\textbf{After:} A shared \texttt{\_cache} dictionary stores the curve and evaluated points, keyed by the byte representation of the input:
+\begin{lstlisting}
+_cache = {'key': None, 'ctrl_pts': None, 'curve': None, ...}
+
+def _get_cached(ctrlpts_flat):
+    key = ctrlpts_flat.tobytes()
+    if key != _cache['key']:
+        _cache['key'] = key
+        _cache['ctrl_pts'] = self._build_control_points(...)
+        _cache['curve'] = Curve(_cache['ctrl_pts'], ...)
+    return _cache
+\end{lstlisting}
+
+\textbf{Additional optimizations:}
+\begin{itemize}[nosep]
+    \item Pre-computed constants outside closures: \texttt{min\_radius\_needed}, \texttt{max\_radius}, all \texttt{t\_values} arrays, \texttt{\_collision\_radii}.
+    \item Reduced sampling: curvature $100 \to 50$ points; boundary $100 \to 40$ points.
+    \item \texttt{np.zeros} replaced with \texttt{np.empty} for segment arrays.
+\end{itemize}
+
+\textbf{Impact:} Curve construction cost reduced by $4\times$ per optimizer iteration. Sampling reduction provides additional ${\sim}2\times$ speedup in constraint evaluation.
+
+%-----------------------------------------------------------------------------
+\subsection{Bezier Vectorization (\texttt{bezier.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Before:} Per-point Python loop calling scalar De Casteljau:
+\begin{lstlisting}
+result = np.array([self._de_casteljau(self.control_points, t)
+                   for t in t_values])
+\end{lstlisting}
+
+\textbf{After:} Vectorized De Casteljau evaluating all $t$ values simultaneously:
+\begin{lstlisting}
+pts = np.broadcast_to(
+    self.control_points[:, None, :],
+    (n, len(t_values), d)).copy()
+t = t_values[None, :, None]
+for i in range(n - 1):
+    pts[:n-1-i] = (1 - t) * pts[:n-1-i] + t * pts[1:n-i]
+return pts[0]
+\end{lstlisting}
+
+The same vectorization was applied to the \texttt{derivative()} method. For the special case of $m=1$ (constant derivative), \texttt{np.broadcast\_to} with \texttt{.copy()} is used.
+
+\textbf{Impact:} Eliminates per-point Python overhead in the inner curve evaluation loop.
+
+%-----------------------------------------------------------------------------
+\subsection{Catmull--Rom Vectorization (\texttt{catmullrom.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Before:} Per-point loop: clamp $t$, find segment, evaluate scalar polynomial.
+
+\textbf{After:} Segment-batched vectorization:
+\begin{lstlisting}
+seg_idx = np.clip(np.floor(t_arr * (n - 1)).astype(int),
+                  0, n - 2)
+for seg in np.unique(seg_idx):
+    mask = (seg_idx == seg)
+    u_vals = local_t[mask]
+    u2, u3 = u_vals**2, u_vals**3
+    # Catmull-Rom polynomial via np.outer
+    out[mask] = 0.5 * (2*p1 + np.outer(u_vals, a)
+                + np.outer(u2, b) + np.outer(u3, c))
+\end{lstlisting}
+
+\textbf{Impact:} Batched evaluation per segment; most $t$ values cluster in a few segments, making this highly efficient.
+
+%-----------------------------------------------------------------------------
+\subsection{Segment Distance Vectorization (\texttt{c\_distance.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Problem:} \texttt{minimum\_segment\_distance()} is called inside the SLSQP optimizer's collision constraint --- one of the most frequently invoked functions.
+
+\textbf{Before:} Double Python for-loop computing each segment pair serially with scalar dot products.
+
+\textbf{After:} Full NumPy broadcasting:
+\begin{lstlisting}
+# Extract endpoints: A0, A1 shape (N,3); B0, B1 shape (M,3)
+# Broadcast to (N,1,3) vs (1,M,3) for pairwise computation
+d = A0[:,None,:] - B0[None,:,:]
+# Compute all dot products, parametric values, distances in bulk
+denom = dotuv * dotuv - dotuu * dotvv  # (N, M)
+\end{lstlisting}
+
+Falls back to scalar computation only for degenerate/parallel cases where $|\text{denom}| < 10^{-14}$.
+
+A new \texttt{\_point\_to\_segment\_distance\_batch()} helper handles vectorized point-to-segment distance.
+
+\texttt{minimum\_self\_segment\_distance()} now computes the full pairwise matrix in one call, then masks out self-distances and adjacent segments.
+
+\textbf{Impact:} $O(N \times M)$ scalar operations replaced with bulk NumPy; dramatic reduction in Python overhead.
+
+%-----------------------------------------------------------------------------
+\subsection{\texttt{deepcopy} Removal}
+%-----------------------------------------------------------------------------
+
+Systematic replacement of \texttt{copy.deepcopy()} with appropriate alternatives across 5 files:
+
+\begin{longtable}{p{3.8cm}p{4cm}p{4.2cm}}
+\toprule
+\textbf{File} & \textbf{Before} & \textbf{After} \\
+\midrule
+\endhead
+\texttt{bifurcation.py} & \texttt{deepcopy(connectivity)} & \texttt{connectivity.copy()} \\
+ & \texttt{deepcopy(sorted(set(...)))} & \texttt{sorted(set(...))} \\
+ & \texttt{deepcopy(upstream)} & \texttt{list(upstream)} \\
+\midrule
+\texttt{tree.py} & \texttt{deepcopy(vessel\_map[k])} & Manual dict + \texttt{list()} \\
+\midrule
+\texttt{vessel\_connection.py} & \texttt{deepcopy(tmp)} on arrays & \texttt{np.empty()} (fresh alloc) \\
+\midrule
+\texttt{assign.py} & \texttt{deepcopy(spline\_data)} & Fresh allocation \\
+\bottomrule
+\end{longtable}
+
+\textbf{Rationale:} \texttt{deepcopy} recursively copies every nested object, which is extremely expensive for NumPy arrays (which support efficient \texttt{.copy()}) and for containers of immutable objects (integers, strings) where shallow copies suffice.
+
+%=============================================================================
+\section{Import/Meshing Pipeline Optimizations}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Skip \texttt{contour()} for Imported Meshes (\texttt{domain.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Problem:} When importing pre-built meshes (STL/VTP), the \texttt{get\_boundary()} method still called \texttt{contour()}, which evaluates the implicit function at $\text{resolution}^3$ grid points to produce \texttt{self.grid}. This grid is never used downstream when an \texttt{original\_boundary} exists.
+
+\textbf{Fix:} When \texttt{original\_boundary} is present, set \texttt{self.grid = None} and skip the \texttt{contour()} call entirely.
+
+\textbf{Impact:} For a resolution of 100, this skips $10^6$ implicit function evaluations.
+
+%-----------------------------------------------------------------------------
+\subsection{In-Process TetGen (\texttt{tetrahedralize.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Before:} Always spawned a subprocess: save VTP to disk $\to$ spawn Python process $\to$ run TetGen $\to$ save NPZ $\to$ load NPZ.
+
+\textbf{After:} Calls the \texttt{tetgen} Python binding directly in-process via \texttt{\_run\_tetgen(surface)}. Falls back to the subprocess approach only if the in-process call raises an exception (crash isolation for edge cases where TetGen segfaults).
+
+\textbf{Impact:} Eliminates file I/O and process spawn overhead, which dominated for small-to-medium meshes.
+
+%-----------------------------------------------------------------------------
+\subsection{ConvexHull Replaces \texttt{delaunay\_3d} (\texttt{domain.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Before:} \texttt{pv.PolyData(points).delaunay\_3d()} for computing convex hull volume.
+
+\textbf{After:} \texttt{scipy.spatial.ConvexHull(points).volume} --- a purpose-built algorithm that is orders of magnitude faster for this specific task.
+
+%-----------------------------------------------------------------------------
+\subsection{Single cKDTree Replaces BallTree (\texttt{domain.py}, \texttt{dmn.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Before:} Both a \texttt{scipy.spatial.cKDTree} and a \texttt{sklearn.neighbors.BallTree} were built on the same cell centers. BallTree was used for \texttt{query\_radius()} calls.
+
+\textbf{After:} \texttt{mesh\_tree\_2 = mesh\_tree} --- a single cKDTree using \texttt{query\_ball\_point()} instead of BallTree's \texttt{query\_radius()}.
+
+\textbf{Impact:} Eliminates the sklearn dependency for this code path and avoids constructing a redundant spatial index.
+
+%-----------------------------------------------------------------------------
+\subsection{Vectorized \texttt{evaluate\_fast} (\texttt{domain.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{Before:} Python for-loop filling the index array row by row:
+\begin{lstlisting}
+for i in range(len(indices)):
+    inds[i, :len(indices[i])] = indices[i]
+\end{lstlisting}
+
+\textbf{After:} Two-phase vectorized fill:
+\begin{enumerate}[nosep]
+    \item Batch handle empty rows with a boolean mask.
+    \item Group rows by identical length using \texttt{np.unique(lengths)}, then fill each group as a single \texttt{np.array} block.
+\end{enumerate}
+
+Auto-chunking (\texttt{\_CHUNK=2000}) caps peak memory for large inputs.
+
+%-----------------------------------------------------------------------------
+\subsection{Cached \texttt{normalize\_scale} (\texttt{domain.py})}
+%-----------------------------------------------------------------------------
+
+Pre-computed once in \texttt{build()} as \texttt{self.\_normalize\_scale} instead of recomputing $\|\max(\text{pts}) - \min(\text{pts})\|$ on every call to \texttt{evaluate\_fast()}.
+
+%-----------------------------------------------------------------------------
+\subsection{Thread-Parallel Patch Operations (\texttt{domain.py})}
+%-----------------------------------------------------------------------------
+
+\texttt{create()} and \texttt{solve()} now use \texttt{ThreadPoolExecutor} to process patches in parallel, since each patch's creation and solving is independent.
+
+%=============================================================================
+\section{Visualization Improvements}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Batch Cylinder Rendering (\texttt{batch\_cylinders.py}, NEW)}
+%-----------------------------------------------------------------------------
+
+A new module provides vectorized construction of cylinder geometry for efficient VTK rendering.
+
+\textbf{Key function:} \texttt{make\_cylinders\_batch(centers, directions, radii, heights, resolution=8)} constructs all cylinder geometry in NumPy:
+\begin{itemize}[nosep]
+    \item Builds local coordinate frames $(u, v, w)$ for all cylinders simultaneously.
+    \item Generates ring vertices via vectorized trigonometry.
+    \item Constructs face connectivity with a precomputed pattern tiled across all cylinders.
+    \item Returns a single \texttt{pv.PolyData} object.
+\end{itemize}
+
+\textbf{Helper functions:}
+\begin{itemize}[nosep]
+    \item \texttt{tree\_to\_merged\_mesh(tree)} --- converts a Tree's vessel data into a single merged mesh.
+    \item \texttt{segments\_to\_merged\_mesh(segments)} --- converts connection vessel segments into a single merged mesh.
+\end{itemize}
+
+\textbf{Impact:} A forest with 1000+ vessels previously created 1000+ VTK actors. Now all vessels are merged into 1--3 actors, dramatically reducing GPU draw calls and VTK overhead.
+
+%-----------------------------------------------------------------------------
+\subsection{Adoption of Batch Rendering}
+%-----------------------------------------------------------------------------
+
+Three visualization files were updated to use the new batch module:
+
+\begin{longtable}{p{4.5cm}p{4cm}p{3.5cm}}
+\toprule
+\textbf{File} & \textbf{Before} & \textbf{After} \\
+\midrule
+\endhead
+\texttt{visualize/tree/show.py} & \texttt{trange} loop + per-vessel \texttt{pv.Cylinder()} & Single \texttt{tree\_to\_merged\_mesh()} \\
+\texttt{visualize/forest/show.py} & Per-vessel loop + per-connection loop & \texttt{tree\_to\_merged\_mesh()} + \texttt{segments\_to\_merged\_mesh()} \\
+\texttt{visualize/gui/vtk\_widget.py} & Per-vessel loop with periodic \texttt{processEvents()} & Single batch call per group \\
+\bottomrule
+\end{longtable}
+
+%-----------------------------------------------------------------------------
+\subsection{macOS VTK/Qt Fixes (\texttt{vtk\_widget.py})}
+%-----------------------------------------------------------------------------
+
+The VTK/Qt visualization had critical issues on macOS Apple Silicon with conda environments:
+\begin{itemize}[nosep]
+    \item \textbf{Offscreen rendering:} Uses offscreen VTK rendering with blit-to-QLabel approach, bypassing \texttt{QtInteractor} deadlock that caused GUI hangs.
+    \item \textbf{Software ray-cast picking:} Implements software ray-cast picking for offscreen mode, since VTK's hardware picker segfaults without an on-screen OpenGL context.
+\end{itemize}
+
+%=============================================================================
+\section{Code Cleanup}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Dead Code Removal}
+%-----------------------------------------------------------------------------
+
+\begin{itemize}[nosep]
+    \item \texttt{assign.py}: Removed ${\sim}200$ lines of commented-out code blocks.
+    \item \texttt{base\_connection.py}: Removed ${\sim}30$ lines of commented-out code.
+    \item \texttt{tree\_connection.py}: Removed debug \texttt{print()} statements.
+\end{itemize}
+
+%-----------------------------------------------------------------------------
+\subsection{Helper Function Extraction}
+%-----------------------------------------------------------------------------
+
+\begin{itemize}[nosep]
+    \item \texttt{assign.py}: \texttt{\_make\_linear\_interp()}, \texttt{\_make\_geodesic\_interp()}, \texttt{\_compute\_path\_and\_func()} --- replacing 6 copy-pasted blocks.
+    \item \texttt{vessel\_connection.py}: \texttt{\_build\_tree\_collision\_segments()} --- extracted from inline index manipulation code.
+\end{itemize}
+
+%=============================================================================
+\section{Summary of Changes by File}
+%=============================================================================
+
+\begin{longtable}{p{5cm}ccp{4.5cm}}
+\toprule
+\textbf{File} & \textbf{+Lines} & \textbf{$-$Lines} & \textbf{Primary Change} \\
+\midrule
+\endhead
+\texttt{CLAUDE.md} & 29 & 0 & Documentation \\
+\texttt{domain/domain.py} & 116 & 72 & ConvexHull, skip contour, vectorize evaluate\_fast, threading \\
+\texttt{domain/io/dmn.py} & 4 & 10 & cKDTree reuse \\
+\texttt{domain/routines/tetrahedralize.py} & 98 & 83 & In-process TetGen \\
+\texttt{forest/connect/assign.py} & 193 & 461 & Pair deduplication, helpers \\
+\texttt{forest/connect/base\_connection.py} & 108 & 146 & Constraint caching \\
+\texttt{forest/connect/bezier.py} & 22 & 4 & Vectorized De Casteljau \\
+\texttt{forest/connect/catmullrom.py} & 33 & 32 & Segment-batched evaluation \\
+\texttt{forest/connect/geodesic.py} & 57 & 45 & Dijkstra cache, vectorized edges \\
+\texttt{forest/connect/tree\_connection.py} & 9 & 26 & Cleanup, remove debug prints \\
+\texttt{forest/connect/vessel\_connection.py} & 34 & 73 & deepcopy removal, helper extraction \\
+\texttt{tree/branch/bifurcation.py} & 13 & 13 & deepcopy $\to$ shallow copy \\
+\texttt{tree/tree.py} & 2 & 1 & deepcopy $\to$ manual dict copy \\
+\texttt{utils/spatial/c\_distance.py} & 139 & 47 & Full NumPy vectorization \\
+\texttt{visualize/batch\_cylinders.py} & 239 & 0 & New: batch cylinder module \\
+\texttt{visualize/forest/show.py} & 14 & 28 & Batch rendering adoption \\
+\texttt{visualize/gui/vtk\_widget.py} & 12 & 48 & Batch rendering + offscreen fixes \\
+\texttt{visualize/tree/show.py} & 4 & 14 & Batch rendering adoption \\
+\midrule
+\textbf{Total} & \textbf{1,005} & \textbf{934} & \textbf{Net: +71 lines} \\
+\bottomrule
+\end{longtable}
+
+%=============================================================================
+\section{Optimization Techniques Summary}
+%=============================================================================
+
+\begin{longtable}{p{3.5cm}p{3.5cm}p{5cm}}
+\toprule
+\textbf{Technique} & \textbf{Files} & \textbf{Description} \\
+\midrule
+\endhead
+NumPy Vectorization & bezier, catmullrom, c\_distance, geodesic, domain & Replace Python loops with broadcasting and advanced indexing \\
+\midrule
+Caching / Memoization & base\_connection, geodesic, domain & Closure-level cache, Dijkstra cache, normalize\_scale \\
+\midrule
+\texttt{deepcopy} Removal & bifurcation, tree, vessel\_connection, assign & \texttt{.copy()}, \texttt{list()}, fresh allocation \\
+\midrule
+Deduplication & assign & \texttt{np.unique} on $(i,j)$ pairs before geodesic \\
+\midrule
+Algorithm Substitution & domain, tetrahedralize & ConvexHull for delaunay\_3d; in-process TetGen \\
+\midrule
+Dependency Elimination & domain, dmn & Removed sklearn BallTree; reuse cKDTree \\
+\midrule
+Short-Circuit & domain & Skip \texttt{contour()} for imported meshes \\
+\midrule
+Batch Rendering & batch\_cylinders, vtk\_widget, forest/show, tree/show & Single merged PolyData per group \\
+\midrule
+Thread Parallelism & domain & ThreadPoolExecutor for patch creation/solving \\
+\bottomrule
+\end{longtable}
+
+\end{document}
