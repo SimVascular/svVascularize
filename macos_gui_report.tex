@@ -1,0 +1,441 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{microtype}
+
+% Colors
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{linkblue}{RGB}{0,80,160}
+
+% Hyperref config
+\hypersetup{
+    colorlinks=true,
+    linkcolor=linkblue,
+    urlcolor=linkblue,
+    citecolor=linkblue,
+}
+
+% Code listing style
+\lstset{
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{codeframe},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\bfseries\color{blue!70!black},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!60!black},
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=2,
+    showstringspaces=false,
+    language=Python,
+    numbers=none,
+}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textsc{svVascularize --- macOS GUI \& Export Report}}
+\fancyhead[R]{\textsc{March 2026}}
+\fancyfoot[C]{\thepage}
+
+% Title formatting
+\titleformat{\section}{\Large\bfseries\color{black}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\large\bfseries}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{}{0em}{}
+
+\begin{document}
+
+% Title page
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\Huge\bfseries svVascularize\\[0.3em] macOS GUI Fix\\[0.3em] \& Export Improvements Report\par}
+\vspace{1.5cm}
+{\Large Commit \texttt{aa742e4} on branch \texttt{MAC\_fixed\_protocols}\par}
+\vspace{1cm}
+{\large March 7, 2026\par}
+\vspace{2cm}
+
+\begin{tabular}{rl}
+\textbf{Files changed:} & 8 (7 modified + 1 new) \\
+\textbf{Lines added:} & +764 \\
+\textbf{Lines removed:} & $-$83 \\
+\textbf{Net change:} & +681 lines \\
+\end{tabular}
+
+\vspace{2cm}
+
+{\large\textsc{Categories of Changes}}\\[0.5em]
+\begin{tabular}{ll}
+\toprule
+Category & Summary \\
+\midrule
+macOS GUI fix & Offscreen VTK rendering, ray-cast picking \\
+Export features & Boundary points, inlet/outlet companion files \\
+Forest export & New \texttt{Forest.export\_centerlines()} method \\
+Toolbar activation & Connected Export button to popup menu \\
+Documentation & New CLAUDE.md repository guidance \\
+\bottomrule
+\end{tabular}
+
+\vfill
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Executive Summary}
+%=============================================================================
+
+This commit resolves a critical GUI hang on macOS Apple Silicon with conda-installed Qt/VTK and adds substantial export functionality. The changes fall into three categories:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{macOS GUI fix} --- A new offscreen VTK rendering pipeline with blit-to-QLabel display and software ray-cast picking, bypassing the \texttt{QtInteractor} deadlock that caused indefinite GUI hangs on macOS.
+    \item \textbf{Export improvements} --- Boundary point metadata (\texttt{BoundaryType} arrays), inlet/outlet companion file generation, and a new \texttt{Forest.export\_centerlines()} method.
+    \item \textbf{UI activation} --- Connected the previously inert Export toolbar button to a full popup menu with all 5 export options.
+\end{enumerate}
+
+%=============================================================================
+\section{macOS GUI Hang Fix}
+%=============================================================================
+
+\subsection{Problem}
+
+On macOS Apple Silicon with conda-installed Qt and VTK packages, the normal \texttt{pyvistaqt.QtInteractor} widget hangs indefinitely during OpenGL context creation. The root cause is a Cocoa GL surface negotiation deadlock between Qt's windowing system and VTK's embedded OpenGL renderer.
+
+\subsection{Solution Architecture}
+
+The fix introduces a two-path rendering strategy: an offscreen fallback for macOS and the original embedded path for all other platforms.
+
+%-----------------------------------------------------------------------------
+\subsection{New Class: \texttt{\_OffscreenBlitWidget} (\texttt{vtk\_widget.py})}
+%-----------------------------------------------------------------------------
+
+A new \texttt{QWidget} subclass (${\sim}246$ lines) that renders VTK offscreen and blits framebuffer images onto a \texttt{QLabel}, completely bypassing embedded OpenGL.
+
+\subsubsection{Rendering Pipeline}
+
+\begin{enumerate}[nosep]
+    \item VTK renders into an offscreen framebuffer via \texttt{pv.Plotter(off\_screen=True)}.
+    \item \texttt{plotter.screenshot(return\_img=True)} captures the framebuffer as a NumPy array.
+    \item The array is converted to \texttt{QImage} (RGB888 format) $\to$ \texttt{QPixmap}.
+    \item The pixmap is displayed on a \texttt{QLabel} widget.
+\end{enumerate}
+
+A debounced \texttt{QTimer} (single-shot, 16ms $\approx$ 60fps cap) throttles repaints. A VTK \texttt{RenderEvent} observer automatically triggers a blit whenever \texttt{plotter.render()} is called internally.
+
+\begin{lstlisting}
+def blit(self):
+    img = self._plotter.screenshot(return_img=True)
+    h, w, ch = img.shape
+    qimg = QImage(img.data, w, h, ch * w, QImage.Format.Format_RGB888)
+    self._label.setPixmap(QPixmap.fromImage(qimg))
+\end{lstlisting}
+
+\subsubsection{Mouse Event Forwarding}
+
+All mouse and wheel events are forwarded to VTK's interactor via \texttt{SetEventInformationFlipY} and corresponding VTK event methods (\texttt{LeftButtonPressEvent}, \texttt{MouseMoveEvent}, etc.), enabling full trackball camera interaction (rotate, pan, zoom):
+
+\begin{lstlisting}
+def mousePressEvent(self, event):
+    self._press_pos = event.position().toPoint()
+    x, y = event.position().x(), event.position().y()
+    iren = self._plotter.iren.interactor
+    iren.SetEventInformationFlipY(int(x), int(y), 0, 0, '0', 0, '')
+    if event.button() == Qt.MouseButton.LeftButton:
+        iren.LeftButtonPressEvent()
+    ...
+\end{lstlisting}
+
+\subsubsection{Click Detection \& Ray-Cast Picking}
+
+Tracks \texttt{\_press\_pos} on mouse press and compares against release position. If pixel distance $\leq 5$ pixels (\texttt{\_CLICK\_TOLERANCE\_PX}), it is treated as a click and ray-cast picking fires. Beyond that threshold, it is treated as a camera drag.
+
+\subsubsection{Software Ray-Cast Picking}
+
+VTK's hardware picker segfaults without an on-screen OpenGL context. The \texttt{\_ray\_pick()} method implements a software replacement:
+
+\begin{enumerate}[nosep]
+    \item Converts display coordinates to world coordinates using \texttt{vtkCoordinate}.
+    \item Computes a ray from camera position through the clicked point.
+    \item Iterates all registered \texttt{\_pickable\_meshes}, calling \texttt{mesh.ray\_trace(cam\_pos, ray\_end)}.
+    \item Returns the closest intersection point.
+\end{enumerate}
+
+\begin{lstlisting}
+def _ray_pick(self, display_x, display_y):
+    coord = vtk.vtkCoordinate()
+    coord.SetCoordinateSystemToDisplay()
+    coord.SetValue(display_x, display_y, 0)
+    world = np.array(coord.GetComputedWorldValue(renderer))
+    cam_pos = np.array(renderer.GetActiveCamera().GetPosition())
+    direction = world - cam_pos
+    direction /= np.linalg.norm(direction)
+    ray_end = cam_pos + direction * 1000.0
+    for mesh in self._pickable_meshes:
+        pts, _ = mesh.ray_trace(cam_pos, ray_end)
+        ...
+\end{lstlisting}
+
+%-----------------------------------------------------------------------------
+\subsection{Offscreen Mode Detection (\texttt{vtk\_widget.py})}
+%-----------------------------------------------------------------------------
+
+A new static method \texttt{VTKWidget.\_should\_use\_offscreen()} (${\sim}20$ lines) automatically detects the problematic environment:
+
+\begin{lstlisting}
+@staticmethod
+def _should_use_offscreen():
+    if os.environ.get('SVV_GUI_FORCE_EMBEDDED_VTK') == '1':
+        return False
+    if os.environ.get('SVV_GUI_FORCE_OFFSCREEN_VTK') == '1':
+        return True
+    return (sys.platform == 'darwin'
+            and os.environ.get('CONDA_PREFIX'))
+\end{lstlisting}
+
+\textbf{Conditions:} Returns \texttt{True} when \texttt{sys.platform == "darwin"} \emph{and} \texttt{CONDA\_PREFIX} is set. Override environment variables allow explicit control.
+
+%-----------------------------------------------------------------------------
+\subsection{Plotter Initialization Refactoring (\texttt{vtk\_widget.py})}
+%-----------------------------------------------------------------------------
+
+The monolithic \texttt{\_init\_plotter()} method (${\sim}80$ lines) was split into 4 methods:
+
+\begin{longtable}{p{4.5cm}p{7.5cm}}
+\toprule
+\textbf{Method} & \textbf{Responsibility} \\
+\midrule
+\endhead
+\texttt{\_init\_plotter()} & Orchestrator: imports pyvista, dispatches to embedded or offscreen path \\
+\texttt{\_init\_plotter\_embedded()} & Creates \texttt{QtInteractor} (normal non-macOS path) \\
+\texttt{\_init\_plotter\_offscreen()} & Creates \texttt{pv.Plotter(off\_screen=True)}, wraps in \texttt{\_OffscreenBlitWidget} \\
+\texttt{\_setup\_plotter\_common()} & Picking, background, lighting, axes, scale bar (shared by both paths) \\
+\bottomrule
+\end{longtable}
+
+For the offscreen path, picking is wired through \texttt{\_blit\_widget.pick\_callback}. For the embedded path, VTK hardware surface picking is used with a 3-level fallback chain: \texttt{enable\_surface\_point\_picking} $\to$ \texttt{enable\_surface\_picking} $\to$ \texttt{enable\_point\_picking}.
+
+%-----------------------------------------------------------------------------
+\subsection{Supporting Changes}
+%-----------------------------------------------------------------------------
+
+\begin{itemize}[nosep]
+    \item \textbf{macOS init delay}: Timer delay changed from 0ms to 200ms on \texttt{darwin}, giving Cocoa time to fully realize the native window before VTK acquires a rendering context.
+    \item \textbf{\texttt{QT\_MAC\_WANTS\_LAYER}}: Set via \texttt{os.environ.setdefault('QT\_MAC\_WANTS\_LAYER', '1')} at both module level (\texttt{vtk\_widget.py}) and package level (\texttt{\_\_init\_\_.py}), forcing layer-backed views on macOS.
+    \item \textbf{Helper methods}: Extracted \texttt{\_remove\_placeholder()} and \texttt{\_show\_vtk\_error()} from duplicated inline code (was 3 copies).
+    \item \textbf{Anti-aliasing guard}: Wrapped \texttt{plotter.enable\_anti\_aliasing()} in try/except.
+\end{itemize}
+
+%=============================================================================
+\section{Export Improvements}
+%=============================================================================
+
+A new boundary point metadata pipeline flows through 5 files:
+
+\begin{center}
+\texttt{build\_centerlines()} $\to$ \texttt{Tree.export\_centerlines()} $\to$ \texttt{Forest.export\_centerlines()} $\to$ \texttt{main\_window.py} dialogs
+\end{center}
+
+%-----------------------------------------------------------------------------
+\subsection{Centerline Metadata (\texttt{export\_centerlines.py})}
+%-----------------------------------------------------------------------------
+
+\subsubsection{\texttt{BoundaryType} Point Data Array}
+
+Added a per-point integer array \texttt{BoundaryType} to each polyline in the output:
+\begin{itemize}[nosep]
+    \item 0 = interior point
+    \item 1 = inlet (tree root, first point of first polyline)
+    \item 2 = outlet (terminal vessel endpoint)
+\end{itemize}
+
+\textbf{Technique:} Computes \texttt{parent\_vessel\_indices} as the set of vessel indices appearing as \texttt{bif[1]} in bifurcation data. Terminal vessels are those \emph{not} in this set. For the root polyline (\texttt{polys[0]}), the first point gets \texttt{BoundaryType = 1}. For every terminal vessel, the last point gets \texttt{BoundaryType = 2}.
+
+\subsubsection{\texttt{boundary\_points} List}
+
+Builds and returns a list of dictionaries:
+\begin{lstlisting}
+[
+  {'type': 'inlet',  'point': np.array([x,y,z]), 'radius': float},
+  {'type': 'outlet', 'point': np.array([x,y,z]), 'radius': float},
+  ...
+]
+\end{lstlisting}
+
+The inlet is always \texttt{polys[0].points[0]}. Outlets are the last point of each terminal vessel polyline. Radii come from the \texttt{MaximumInscribedSphereRadius} point data array.
+
+\subsubsection{Return Value Change}
+
+\textbf{Before:} \texttt{return centerlines\_all, polys} (2-tuple).\\
+\textbf{After:} \texttt{return centerlines\_all, polys, boundary\_points} (3-tuple).
+
+%-----------------------------------------------------------------------------
+\subsection{Tree Export Update (\texttt{tree.py})}
+%-----------------------------------------------------------------------------
+
+\texttt{Tree.export\_centerlines()} updated to unpack and forward the new 3-element return tuple:
+\begin{lstlisting}
+centerlines, polys, boundary_points = build_centerlines(self, ...)
+return centerlines, polys, boundary_points
+\end{lstlisting}
+
+Docstring updated to document the \texttt{BoundaryType} array and \texttt{boundary\_points} return value.
+
+%-----------------------------------------------------------------------------
+\subsection{New: \texttt{Forest.export\_centerlines()} (\texttt{forest.py})}
+%-----------------------------------------------------------------------------
+
+A new 54-line method enabling centerline export across all trees in all networks:
+
+\begin{lstlisting}
+def export_centerlines(self, points_per_unit_length=100):
+    all_centerlines, all_polys, all_boundary = [], [], []
+    for net_idx, network in enumerate(self.networks):
+        for tree_idx, tree in enumerate(network):
+            cl, polys, bp = tree.export_centerlines(...)
+            all_centerlines.append(cl)
+            all_polys.extend(polys)
+            for pt in bp:
+                pt['tree_label'] = f"network{net_idx}_tree{tree_idx}"
+            all_boundary.extend(bp)
+    merged = pv.PolyData.merge(all_centerlines, merge_points=False)
+    return merged, all_polys, all_boundary
+\end{lstlisting}
+
+Each boundary point is labeled with \texttt{tree\_label} indicating its source network and tree. Raises \texttt{ValueError} if no trees have data.
+
+%-----------------------------------------------------------------------------
+\subsection{Simulation Compatibility Fix (\texttt{simulation.py})}
+%-----------------------------------------------------------------------------
+
+Changed unpacking from \texttt{centerlines, \_ = ...} to \texttt{centerlines, *\_ = ...} to accommodate the new 3-tuple return value. The \texttt{*\_} absorbs additional return values, making it forward-compatible.
+
+%=============================================================================
+\section{Export Toolbar Activation}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Popup Menu (\texttt{main\_window.py})}
+%-----------------------------------------------------------------------------
+
+The previously inert Export toolbar button was connected to a new \texttt{\_show\_export\_menu()} method that displays a \texttt{QMenu} with 5 options:
+
+\begin{enumerate}[nosep]
+    \item Export Centerlines\ldots
+    \item Export Solids\ldots
+    \item Export Splines\ldots
+    \item \textit{(separator)}
+    \item Export 0D Simulation\ldots
+    \item Export 3D Simulation\ldots
+\end{enumerate}
+
+The menu is positioned below the toolbar button using \texttt{btn.mapToGlobal(btn.rect().bottomLeft())}.
+
+%-----------------------------------------------------------------------------
+\subsection{Centerline Export Dialog (\texttt{main\_window.py})}
+%-----------------------------------------------------------------------------
+
+\textbf{New UI element:} ``Export boundary points (inlets/outlets)'' checkbox.
+
+When checked, a companion \texttt{\_inlet\_outlet.txt} file is written alongside the VTP file:
+\begin{lstlisting}[language={}]
+inlet
+1.23, 4.56, 7.89
+outlet
+2.34, 5.67, 8.90
+3.45, 6.78, 9.01
+\end{lstlisting}
+
+Coordinates are formatted to 2 decimal places.
+
+%-----------------------------------------------------------------------------
+\subsection{Spline Export Dialog (\texttt{main\_window.py})}
+%-----------------------------------------------------------------------------
+
+Added the same boundary-point export capability via 3 new helper functions:
+
+\begin{longtable}{p{4.5cm}p{7.5cm}}
+\toprule
+\textbf{Function} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{\_get\_start\_point(tree)} & Returns the root segment's proximal point by finding the row where column 17 (parent index) is NaN \\
+\texttt{\_pair\_forest\_boundary(forest)} & Pairs tree start points as inlet/outlet per network; even-indexed $\to$ inlet, odd-indexed $\to$ outlet \\
+\texttt{\_write\_boundary\_file(inlets, outlets, dst)} & Writes the companion \texttt{\_inlet\_outlet.txt} file \\
+\bottomrule
+\end{longtable}
+
+These helpers are called for all 4 spline export code paths: single tree, connected forest, single tree from forest, and multiple trees from forest.
+
+%=============================================================================
+\section{Documentation (\texttt{CLAUDE.md})}
+%=============================================================================
+
+A new 87-line repository guidance file covering:
+\begin{itemize}[nosep]
+    \item Project overview (svVascularize purpose, PyPI name, Python version support)
+    \item Build \& install commands (editable install, PyPI, accelerated)
+    \item Test commands (pytest, smoke test)
+    \item Architecture documentation (Domain/Tree/Forest/Simulation modules with builder patterns)
+    \item Cython acceleration notes
+    \item Key external dependencies (MMG, svZeroDSolver, PyVista, PySide6, TetGen)
+    \item Platform-specific notes
+\end{itemize}
+
+%=============================================================================
+\section{Summary of Changes by File}
+%=============================================================================
+
+\begin{longtable}{p{5cm}ccp{4.5cm}}
+\toprule
+\textbf{File} & \textbf{+Lines} & \textbf{$-$Lines} & \textbf{Primary Change} \\
+\midrule
+\endhead
+\texttt{visualize/gui/vtk\_widget.py} & 415 & 68 & Offscreen rendering, ray-cast picking, plotter refactoring \\
+\texttt{visualize/gui/main\_window.py} & 152 & 5 & Export popup menu, boundary point dialogs \\
+\texttt{forest/forest.py} & 54 & 0 & New \texttt{export\_centerlines()} \\
+\texttt{tree/export/export\_centerlines.py} & 34 & 1 & BoundaryType array, boundary\_points \\
+\texttt{tree/tree.py} & 8 & 4 & 3-tuple return, docstring \\
+\texttt{visualize/gui/\_\_init\_\_.py} & 8 & 0 & QT\_MAC\_WANTS\_LAYER env var \\
+\texttt{simulation/simulation.py} & 1 & 1 & \texttt{*\_} unpacking fix \\
+\texttt{CLAUDE.md} & 87 & 0 & New: repository guidance \\
+\midrule
+\textbf{Total} & \textbf{764} & \textbf{83} & \textbf{Net: +681 lines} \\
+\bottomrule
+\end{longtable}
+
+%=============================================================================
+\section{Cross-Cutting Themes}
+%=============================================================================
+
+\begin{longtable}{p{3.5cm}p{3.5cm}p{5cm}}
+\toprule
+\textbf{Theme} & \textbf{Files} & \textbf{Description} \\
+\midrule
+\endhead
+macOS Apple Silicon fix & vtk\_widget.py, \_\_init\_\_.py & Offscreen detection, \texttt{QT\_MAC\_WANTS\_LAYER}, 200ms init delay, layer-backed views \\
+\midrule
+Boundary point pipeline & export\_centerlines.py $\to$ tree.py $\to$ forest.py $\to$ main\_window.py & BoundaryType arrays, boundary\_points dicts, companion \_inlet\_outlet.txt files \\
+\midrule
+Export activation & main\_window.py & Toolbar button $\to$ popup menu with all 5 export options \\
+\midrule
+Forward compatibility & simulation.py & \texttt{*\_} unpacking for new return tuple \\
+\bottomrule
+\end{longtable}
+
+\end{document}
