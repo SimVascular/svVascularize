@@ -3,7 +3,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import csv
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 
 
 def read_csv_into_nested_dict(file_path):
@@ -39,85 +39,141 @@ def read_csv_into_nested_dict(file_path):
 geom_data = np.genfromtxt("geom.csv",delimiter=",")
 data = read_csv_into_nested_dict("output.csv")
 
-total = None
-timepoints = []
+render_pngs = os.environ.get("SVV_0D_RENDER_SCREENSHOTS", "1") == "1"
+write_total = os.environ.get("SVV_0D_WRITE_TOTAL_VTP", "1") == "1"
+cylinder_resolution = max(3, int(os.environ.get("SVV_0D_CYLINDER_RESOLUTION", "24")))
+cylinder_capping = os.environ.get("SVV_0D_CYLINDER_CAPPING", "0") == "1"
+max_units = int(os.environ.get("SVV_0D_MAX_VESSELS", "0"))
+max_timesteps = int(os.environ.get("SVV_0D_MAX_TIMESTEPS", "0"))
+timestep_stride = max(1, int(os.environ.get("SVV_0D_TIMESTEP_STRIDE", "1")))
+
+for folder in ("timeseries", "timeseries_for_pressure_gif", "timeseries_for_flow_gif", "timeseries_for_wss_gif"):
+    os.makedirs(folder, exist_ok=True)
+
+all_units = []
+for vessel in sorted(data['flow_in'].keys()):
+    start = geom_data[vessel, 0:3]
+    end = geom_data[vessel, 3:6]
+    direction = geom_data[vessel, 3:6] - geom_data[vessel, 0:3]
+    direction_norm = np.linalg.norm(direction)
+    if direction_norm == 0.0:
+        continue
+    direction = direction / direction_norm
+    length = float(geom_data[vessel, 6])
+    radius = float(geom_data[vessel, 7])
+    center = 0.5 * direction * length + start
+    for segment in sorted(data['flow_in'][vessel].keys()):
+        base_mesh = pv.Cylinder(
+            center=center,
+            direction=direction,
+            height=length,
+            radius=radius,
+            resolution=cylinder_resolution,
+            capping=cylinder_capping,
+        )
+        base_mesh = base_mesh.elevation(low_point=end, high_point=start, scalar_range=[0.0, 1.0])
+        axis_unit = np.asarray(base_mesh.point_data['Elevation'])
+        all_units.append({
+            'vessel': vessel,
+            'segment': segment,
+            'radius': radius,
+            'base_mesh': base_mesh,
+            'axis_unit': axis_unit,
+        })
+        if max_units > 0 and len(all_units) >= max_units:
+            break
+    if max_units > 0 and len(all_units) >= max_units:
+        break
+
+if len(all_units) == 0:
+    raise RuntimeError("No vessel geometry could be generated from geom.csv.")
+
+first_vessel = next(iter(data['time']))
+first_segment = next(iter(data['time'][first_vessel]))
+num_timesteps = len(data['time'][first_vessel][first_segment])
+if max_timesteps > 0:
+    num_timesteps = min(num_timesteps, max_timesteps)
+timesteps = list(range(0, num_timesteps, timestep_stride))
+
+print("Found {} vessel segments across {} timesteps".format(len(all_units), len(timesteps)))
+print(
+    "Options: render_pngs={}, write_total={}, cylinder_resolution={}, cylinder_capping={}, max_vessels={}, max_timesteps={}, timestep_stride={}".format(
+        render_pngs,
+        write_total,
+        cylinder_resolution,
+        cylinder_capping,
+        max_units,
+        max_timesteps,
+        timestep_stride,
+    )
+)
+
 min_pressure = np.inf
 max_pressure = -np.inf
 min_flow = np.inf
 max_flow = -np.inf
 min_wss = np.inf
 max_wss = -np.inf
-for idx in tqdm(range(len(data['time'][0][0])),desc="Building Timeseries ",position=0):
-    #time_merge = None
-    time = data['time'][0][0][idx]
-    tmp_vessels = []
-    for jdx in tqdm(range(len(data['flow_in'])),desc="Building Vessel Data",position=1,leave=False):
-        vessel = list(data['flow_in'].keys())[jdx]
-        start = geom_data[vessel,0:3]
-        end   = geom_data[vessel,3:6]
-        direction = (geom_data[vessel,3:6] - geom_data[vessel,0:3])/np.linalg.norm(geom_data[vessel,3:6] - geom_data[vessel,0:3])
-        length    = geom_data[vessel,6]
-        radius    = geom_data[vessel,7]
-        number_segments = len(data['flow_in'][vessel]) #- 1 #assume only 1 segment right now
-        number_points   = len(data['flow_in'][vessel])
-        vdx = vessel
-        for kdx in range(number_segments):
-            center = (1/2)*direction*length + start
-            vessel = pv.Cylinder(center=center,direction=direction,height=length,radius=radius)
-            vessel = vessel.elevation(low_point=end,high_point=start,scalar_range=[data['pressure_out'][vdx][kdx][idx]/1333.33, data['pressure_in'][vdx][kdx][idx]/1333.33])
-            if data['pressure_in'][vdx][kdx][idx]/1333.33 > max_pressure:
-                max_pressure = data['pressure_in'][vdx][kdx][idx]/1333.33
-            if data['pressure_out'][vdx][kdx][idx]/1333.33 < min_pressure:
-                min_pressure = data['pressure_out'][vdx][kdx][idx]/1333.33
-            vessel.rename_array('Elevation','Pressure [mmHg]',preference='point')
-            vessel.cell_data['Flow [mL/s]'] = data['flow_in'][vdx][kdx][idx]
-            re = (1.06*2*radius*((data['flow_in'][vdx][kdx][idx]/(np.pi*radius**2))/2))/0.04
-            fd = 64/re
-            wss = ((data['flow_in'][vdx][kdx][idx]/(np.pi*radius**2))/2)*fd*1.06
-            vessel.cell_data['WSS [dyne/cm^2]']  = wss
-            if max_flow < data['flow_in'][vdx][kdx][idx]:
-                max_flow = data['flow_in'][vdx][kdx][idx]
-            if min_flow > data['flow_in'][vdx][kdx][idx]:
-                min_flow = data['flow_in'][vdx][kdx][idx]
-            if max_wss < wss:
-                max_wss = wss
-            if min_wss > wss:
-                min_wss = wss
-            tmp_vessels.append(vessel)
-        #if time_merge is None:
-        #    time_merge = vessel
-        #else:
-        #    time_merge = time_merge.merge(vessel)
-    time_merge = tmp_vessels[0].merge(tmp_vessels[1:])
-    time_merge.field_data['time'] = time
-    timepoints.append(time_merge)
-    #if total is None:
-    #    total = time_merge
-    #else:
-    #    total = total.merge(time_merge)
-    if not os.path.isdir("timeseries"):
-        os.mkdir("timeseries")
+for idx in timesteps:
+    for unit in all_units:
+        vessel = unit['vessel']
+        segment = unit['segment']
+        radius = unit['radius']
+        p_in = float(data['pressure_in'][vessel][segment][idx]) / 1333.33
+        p_out = float(data['pressure_out'][vessel][segment][idx]) / 1333.33
+        q_in = float(data['flow_in'][vessel][segment][idx])
+        vel = (q_in / (np.pi * radius**2)) / 2.0
+        re = (1.06 * 2.0 * radius * vel) / 0.04
+        fd = 0.0 if re == 0.0 else 64.0 / re
+        wss = vel * fd * 1.06
+        min_pressure = min(min_pressure, p_in, p_out)
+        max_pressure = max(max_pressure, p_in, p_out)
+        min_flow = min(min_flow, q_in)
+        max_flow = max(max_flow, q_in)
+        min_wss = min(min_wss, wss)
+        max_wss = max(max_wss, wss)
 
-if not os.path.isdir("timeseries_for_pressure_gif"):
-    os.mkdir("timeseries_for_pressure_gif")
-if not os.path.isdir("timeseries_for_flow_gif"):
-    os.mkdir("timeseries_for_flow_gif")
-if not os.path.isdir("timeseries_for_wss_gif"):
-    os.mkdir("timeseries_for_wss_gif")
-total = timepoints[0].merge(timepoints[1:])
-for i in tqdm(range(len(timepoints)),desc="Saving Timeseries",position=1):
-    p = pv.Plotter(off_screen=True)
-    p.add_mesh(timepoints[i],scalars='Pressure [mmHg]',clim=[round(min_pressure,4),round(max_pressure,4)],cmap="coolwarm")
-    p.show(auto_close=True,screenshot=os.getcwd()+os.sep+"timeseries_for_pressure_gif"+os.sep+"time_point_{}.png".format(i))
-    p = pv.Plotter(off_screen=True)
-    p.add_mesh(timepoints[i],scalars='Flow [mL/s]',clim=[round(min_flow,4),round(max_flow,4)],cmap="GnBu")
-    p.show(auto_close=True,screenshot=os.getcwd()+os.sep+"timeseries_for_flow_gif"+os.sep+"time_point_{}.png".format(i))
-    p = pv.Plotter(off_screen=True)
-    p.add_mesh(timepoints[i],scalars='WSS [dyne/cm^2]',clim=[round(min_wss,2),round(max_wss,2)],cmap="coolwarm")
-    p.show(auto_close=True,screenshot=os.getcwd()+os.sep+"timeseries_for_wss_gif"+os.sep+"time_point_{}.png".format(i))
-    timepoints[i].save(os.getcwd()+os.sep+"timeseries"+os.sep+"time_point_{}.vtp".format(i))
+total = None
+for out_idx, idx in enumerate(tqdm(timesteps, desc="Building/Saving Timeseries", position=0)):
+    time_value = float(data['time'][first_vessel][first_segment][idx])
+    meshes = []
+    for unit in all_units:
+        vessel = unit['vessel']
+        segment = unit['segment']
+        radius = unit['radius']
+        axis_unit = unit['axis_unit']
+        mesh = unit['base_mesh'].copy(deep=True)
+        p_in = float(data['pressure_in'][vessel][segment][idx]) / 1333.33
+        p_out = float(data['pressure_out'][vessel][segment][idx]) / 1333.33
+        q_in = float(data['flow_in'][vessel][segment][idx])
+        mesh.point_data['Pressure [mmHg]'] = p_out + axis_unit * (p_in - p_out)
+        mesh.cell_data['Flow [mL/s]'] = q_in
+        vel = (q_in / (np.pi * radius**2)) / 2.0
+        re = (1.06 * 2.0 * radius * vel) / 0.04
+        fd = 0.0 if re == 0.0 else 64.0 / re
+        mesh.cell_data['WSS [dyne/cm^2]'] = vel * fd * 1.06
+        meshes.append(mesh)
 
-total.save(os.getcwd()+os.sep+"timeseries"+os.sep+"total.vtp")
+    time_mesh = meshes[0].merge(meshes[1:]) if len(meshes) > 1 else meshes[0]
+    time_mesh.field_data['time'] = np.array([time_value], dtype=float)
+    time_mesh.save(os.path.join(os.getcwd(), "timeseries", "time_point_{}.vtp".format(out_idx)))
+
+    if render_pngs:
+        p = pv.Plotter(off_screen=True)
+        p.add_mesh(time_mesh, scalars='Pressure [mmHg]', clim=[round(min_pressure, 4), round(max_pressure, 4)], cmap="coolwarm")
+        p.show(auto_close=True, screenshot=os.path.join(os.getcwd(), "timeseries_for_pressure_gif", "time_point_{}.png".format(out_idx)))
+        p = pv.Plotter(off_screen=True)
+        p.add_mesh(time_mesh, scalars='Flow [mL/s]', clim=[round(min_flow, 4), round(max_flow, 4)], cmap="GnBu")
+        p.show(auto_close=True, screenshot=os.path.join(os.getcwd(), "timeseries_for_flow_gif", "time_point_{}.png".format(out_idx)))
+        p = pv.Plotter(off_screen=True)
+        p.add_mesh(time_mesh, scalars='WSS [dyne/cm^2]', clim=[round(min_wss, 2), round(max_wss, 2)], cmap="coolwarm")
+        p.show(auto_close=True, screenshot=os.path.join(os.getcwd(), "timeseries_for_wss_gif", "time_point_{}.png".format(out_idx)))
+
+    if write_total:
+        total = time_mesh if total is None else total.merge(time_mesh)
+
+if write_total and total is not None:
+    total.save(os.path.join(os.getcwd(), "timeseries", "total.vtp"))
 
 """
 

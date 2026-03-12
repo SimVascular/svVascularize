@@ -13,6 +13,7 @@
       <h1><a href="index.html">svVascularize</a></h1>
       <nav>
         <a href="#about">About</a>
+        <a href="#playground">Try Online</a>
         <a href="install.html">Installation</a>
         <a href="doc.html">Documentation</a>
         <a href="#simulation">Simulation</a>
@@ -45,6 +46,112 @@
     </div>
   </section>
 
+  <section id="playground" class="content">
+    <div class="container">
+      <h3>Try <code>svVascularize</code> in your browser</h3>
+      <p>
+        This runs the real <code>svv</code> API in a temporary cloud session via
+        <a href="https://mybinder.org/" target="_blank" rel="noopener">Binder</a> and renders the resulting tree here in 3D.
+        The first launch can take a couple minutes.
+      </p>
+
+      <div class="playground" id="svv-playground" aria-label="svVascularize browser playground">
+        <div class="playground__controls">
+          <button class="btn" id="svv-play-load" type="button">Start interactive session</button>
+          <span class="playground__status" id="svv-play-status">Not started</span>
+        </div>
+
+        <div class="playground__grid">
+          <div class="playground__panel">
+            <div class="playground__label">Python (<code>svv</code>)</div>
+            <div class="thebe">
+              <pre data-executable="true" data-language="python" class="no-copy"># This cell runs on Binder (real Python + real svv).
+
+import json
+import numpy as np
+import pyvista as pv
+from IPython.display import Javascript, display
+
+from svv.domain.domain import Domain
+from svv.tree.tree import Tree
+
+
+def _set_status(text: str) -&gt; None:
+    display(Javascript(f"svvPlaygroundSetStatus({json.dumps(str(text))});"))
+
+
+def _tree_to_lines(tree: Tree):
+    # Use the TreeData node ids (cols 18/19) to preserve connectivity.
+    data = np.asarray(tree.data, dtype=float)
+
+    points = []
+    node_index = {}
+    edges = []
+
+    for row in data:
+        a_raw = row[18]
+        b_raw = row[19]
+        a_key = ("id", int(a_raw)) if np.isfinite(a_raw) else ("pt", tuple(np.round(row[0:3], 12)))
+        b_key = ("id", int(b_raw)) if np.isfinite(b_raw) else ("pt", tuple(np.round(row[3:6], 12)))
+
+        ia = node_index.get(a_key)
+        if ia is None:
+            ia = len(points)
+            node_index[a_key] = ia
+            points.append([float(x) for x in row[0:3]])
+
+        ib = node_index.get(b_key)
+        if ib is None:
+            ib = len(points)
+            node_index[b_key] = ib
+            points.append([float(x) for x in row[3:6]])
+
+        if ia != ib:
+            edges.append([ia, ib])
+
+    return points, edges
+
+
+_set_status("Building domain…")
+surface = pv.Cube(x_length=1.0, y_length=1.0, z_length=1.0)
+dom = Domain(surface)
+dom.set_random_seed(0)
+dom.create()
+dom.solve()
+dom.build()
+
+_set_status("Growing tree…")
+t = Tree()
+t.set_domain(dom)
+t.set_root()
+t.n_add(80)
+
+points, edges = _tree_to_lines(t)
+
+display(Javascript("playground_clear?.();"))
+display(Javascript("render_domain?.('box', 0.5);"))
+display(Javascript(f"render_lines?.({json.dumps(points)}, {json.dumps(edges)});"))
+
+_set_status(f"Ready — segments: {int(t.data.shape[0])}, nodes: {len(points)}")</pre>
+              <div class="thebe-output"></div>
+            </div>
+          </div>
+
+          <div class="playground__panel">
+            <div class="playground__label">3D Preview</div>
+            <div class="playground__canvas-wrap">
+              <div id="svv-play-canvas" class="playground__canvas" aria-label="3D preview"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="callout tip">
+          <strong>Tip:</strong> Click the cell’s run button (or press <code>Shift+Enter</code>) to execute. Change <code>t.n_add(…)</code> and re-run to grow a larger/smaller tree.
+        </div>
+      </div>
+    </div>
+  </section>
+
 
   <section id="simulation" class="content">
     <div class="container">
@@ -72,5 +179,8 @@
       <a href="https://opensource.org/license/BSD-3-Clause">BSD 3-Clause License</a><br></p>
     </div>
   </footer>
+
+  <script defer src="script.js"></script>
+  <script type="module" src="playground.js"></script>
 </body>
 </html>

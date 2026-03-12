@@ -1585,8 +1585,7 @@ class VascularizeGUI(QMainWindow):
         obj = self._require_synthetic_object()
         if obj is None:
             return
-        from svv.simulation.fluid.rom.zero_d.zerod_tree import export_0d_simulation as export_tree_0d
-        from svv.simulation.fluid.rom.zero_d.zerod_forest import export_0d_simulation as export_forest_0d
+        from svv.simulation.simulation import Simulation
 
         is_tree = isinstance(obj, _svv_tree_mod.Tree)
         is_forest = isinstance(obj, _svv_forest_mod.Forest)
@@ -1798,12 +1797,11 @@ class VascularizeGUI(QMainWindow):
         export_path = target_path
 
         try:
+            sim = Simulation(obj, directory=out_dir)
+            sim.file_path = export_path
             if is_tree:
-                export_tree_0d(
-                    obj,
+                sim.export_0d_fluid_simulation(
                     steady=steady,
-                    outdir=out_dir,
-                    folder=folder,
                     number_cardiac_cycles=number_cardiac_cycles,
                     flow=None,
                     number_time_pts_per_cycle=number_time_pts_per_cycle,
@@ -1823,13 +1821,10 @@ class VascularizeGUI(QMainWindow):
             elif is_forest:
                 if network_id is None or inlets is None:
                     raise ValueError("Network ID and inlets are required for forest 0D export.")
-                export_forest_0d(
-                    obj,
+                sim.export_0d_fluid_simulation(
                     network_id,
                     inlets,
                     steady=steady,
-                    outdir=out_dir,
-                    folder=folder,
                     number_cardiac_cycles=number_cardiac_cycles,
                     flow=None,
                     number_time_pts_per_cycle=number_time_pts_per_cycle,
@@ -1871,12 +1866,9 @@ class VascularizeGUI(QMainWindow):
             from svv.simulation.simulation import Simulation
 
             sim = Simulation(obj, directory=out_dir)
-            # Basic workflow: build fluid meshes only, then extract faces.
-            sim.build_meshes(fluid=True, tissue=False)
-            sim.extract_faces()
-            # 3D solver input export is typically handled by downstream tools;
-            # here we just ensure meshes/faces exist in the chosen directory.
-            self.update_status(f"3D simulation meshes prepared in {out_dir}")
+            sim.file_path = out_dir
+            sim.export_3d_fluid_simulation()
+            self.update_status(f"3D simulation setup written to {out_dir}")
         except Exception as e:
             self._record_telemetry(e, action="export_3d")
             QMessageBox.critical(

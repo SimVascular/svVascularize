@@ -1,7 +1,11 @@
 # Remeshing utility based on MMG executables
 
 import os
+import shutil
 import subprocess
+import tempfile
+from pathlib import Path
+
 import pyvista as pv
 import pymeshfix
 import meshio
@@ -406,80 +410,102 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         remeshed = remesh_surface_2d(boundary, hmax=0.2, hmin=0.05, hausd=0.01, verbosity=3)
     """
     _mesh_ = pv.PolyData(pv_polydata_object.points, pv_polydata_object.faces)
-    pv.save_meshio("tmp.mesh", _mesh_)
-    if not isinstance(required_triangles, type(None)):
-        add_required("tmp.mesh", required_triangles)
+    if required_triangles is not None and (not _mesh_.is_all_triangles):
+        raise ValueError(
+            "remesh_surface(required_triangles=...) requires the input surface to be all triangles "
+            "(so indices match). Triangulate the mesh first."
+        )
+    if not _mesh_.is_all_triangles:
+        _mesh_ = _mesh_.triangulate(inplace=False)
 
-    args = ["tmp.mesh"]
-    # If caller prepared a sizing function file in the working directory,
-    # detect and pass it through to MMG.
-    sol_path = None
-    try:
-        if os.path.exists("in.sol"):
-            sol_path = "in.sol"
-    except Exception:
-        sol_path = None
-    if sol_path:
-        args.extend(["-sol", sol_path])
-    if ar is not None:
-        args.extend(["-ar", str(ar)])
-    if hausd is not None:
-        args.extend(["-hausd", str(hausd)])
-    if hgrad is not None:
-        args.extend(["-hgrad", str(hgrad)])
-    if verbosity is not None:
-        args.extend(["-v", str(verbosity)])
-    if hmax is not None:
-        args.extend(["-hmax", str(hmax)])
-    if hmin is not None:
-        args.extend(["-hmin", str(hmin)])
-    if hsiz is not None:
-        args.extend(["-hsiz", str(hsiz)])
-    if noinsert is not None:
-        args.extend(["-noinsert"])
-    if nomove is not None:
-        args.extend(["-nomove"])
-    if nosurf is not None:
-        args.extend(["-nosurf"])
-    if noswap is not None:
-        args.extend(["-noswap"])
-    if nr is not None:
-        args.extend(["-nr"])
-    if optim:
-        args.extend(["-optim"])
-    if rn is not None:
-        args.extend(["-rn", str(rn)])
-    if verbosity == 0:
-        run_mmg("mmgs", args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        run_mmg("mmgs", args)
-    clean_medit("tmp.o.mesh")
-    remesh_data = meshio.read("tmp.o.mesh")
-    vertices = remesh_data.points
-    has_triangles = False
-    for cell_block in remesh_data.cells:
-        if cell_block.type == "triangle":
-            faces = cell_block.data
-            has_triangles = True
-            break
-    if not has_triangles:
-        raise NotImplementedError("Only triangular surfaces are supported.")
-    faces = numpy.hstack([numpy.full((faces.shape[0], 1), 3), faces])
-    remeshed_surface = pv.PolyData(vertices, faces.flatten())
-    if autofix:
-        if not remeshed_surface.is_manifold:
-            fix = pymeshfix.MeshFix(remeshed_surface)
-            if verbosity == 0:
-                fix.repair(verbose=False)
-            fix.repair(verbose=True)
-            remeshed_surface = fix.mesh
-    os.remove("tmp.mesh")
-    os.remove("tmp.o.sol")
-    os.remove("tmp.o.mesh")
-    # Clean up sizing file if provided
-    if sol_path and os.path.exists(sol_path):
+    # Run MMG in an isolated temp directory to avoid permission issues and temp-file collisions.
+    tmp_root = None
+    if os.name == "nt":
+        for env_var in ("TEMP", "TMP"):
+            candidate = os.environ.get(env_var)
+            if candidate and os.path.isdir(candidate):
+                tmp_root = candidate
+                break
+
+    sol_src = Path("in.sol")
+    sol_used = False
+    mmg_succeeded = False
+    with tempfile.TemporaryDirectory(prefix="svv_remesh_", dir=tmp_root) as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        mesh_path = tmpdir_path / "tmp.mesh"
+        pv.save_meshio(str(mesh_path), _mesh_, file_format="medit")
+        if required_triangles is not None:
+            add_required(str(mesh_path), required_triangles)
+
+        args = ["tmp.mesh"]
+        # If caller prepared a sizing function file in the working directory,
+        # detect and pass it through to MMG.
+        if sol_src.is_file():
+            shutil.copy2(sol_src, tmpdir_path / "in.sol")
+            sol_used = True
+            args.extend(["-sol", "in.sol"])
+
+        if ar is not None:
+            args.extend(["-ar", str(ar)])
+        if hausd is not None:
+            args.extend(["-hausd", str(hausd)])
+        if hgrad is not None:
+            args.extend(["-hgrad", str(hgrad)])
+        if verbosity is not None:
+            args.extend(["-v", str(verbosity)])
+        if hmax is not None:
+            args.extend(["-hmax", str(hmax)])
+        if hmin is not None:
+            args.extend(["-hmin", str(hmin)])
+        if hsiz is not None:
+            args.extend(["-hsiz", str(hsiz)])
+        if noinsert is not None:
+            args.extend(["-noinsert"])
+        if nomove is not None:
+            args.extend(["-nomove"])
+        if nosurf is not None:
+            args.extend(["-nosurf"])
+        if noswap is not None:
+            args.extend(["-noswap"])
+        if nr is not None:
+            args.extend(["-nr"])
+        if optim:
+            args.extend(["-optim"])
+        if rn is not None:
+            args.extend(["-rn", str(rn)])
+
+        if verbosity == 0:
+            run_mmg("mmgs", args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=tmpdir)
+        else:
+            run_mmg("mmgs", args, cwd=tmpdir)
+        mmg_succeeded = True
+
+        out_mesh_path = tmpdir_path / "tmp.o.mesh"
+        clean_medit(str(out_mesh_path))
+        remesh_data = meshio.read(str(out_mesh_path))
+        vertices = remesh_data.points
+        has_triangles = False
+        for cell_block in remesh_data.cells:
+            if cell_block.type == "triangle":
+                faces = cell_block.data
+                has_triangles = True
+                break
+        if not has_triangles:
+            raise NotImplementedError("Only triangular surfaces are supported.")
+        faces = numpy.hstack([numpy.full((faces.shape[0], 1), 3), faces])
+        remeshed_surface = pv.PolyData(vertices, faces.flatten())
+        if autofix:
+            if not remeshed_surface.is_manifold:
+                fix = pymeshfix.MeshFix(remeshed_surface)
+                if verbosity == 0:
+                    fix.repair(verbose=False)
+                fix.repair(verbose=True)
+                remeshed_surface = fix.mesh
+
+    # Clean up sizing file if provided (historical behavior)
+    if mmg_succeeded and sol_used:
         try:
-            os.remove(sol_path)
+            sol_src.unlink()
         except Exception:
             pass
     return remeshed_surface

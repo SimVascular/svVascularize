@@ -1,8 +1,8 @@
 """
-Platform/architecture-aware MMG executable selection.
+Platform/architecture-aware svZeroDSolver executable selection.
 
-This module intentionally avoids importing heavy dependencies (PyVista, VTK, etc.)
-so it can be used in lightweight CI checks and during wheel build validation.
+This module intentionally avoids importing heavy dependencies so it can be used
+in lightweight CI checks and during wheel build validation.
 """
 
 from __future__ import annotations
@@ -17,14 +17,10 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 
-MMG_TOOL_TO_EXE = {
-    "mmg2d": "mmg2d_O3",
-    "mmg3d": "mmg3d_O3",
-    "mmgs": "mmgs_O3",
-}
+SOLVER_0D_EXE_BASENAME = "svzerodsolver"
 
 
 def _norm_os_dir(system: Optional[str] = None) -> str:
@@ -47,13 +43,10 @@ def _norm_arch(machine: Optional[str] = None) -> str:
     return m or "unknown"
 
 
-def _mmg_exe_filename(tool: str) -> str:
-    if tool not in MMG_TOOL_TO_EXE:
-        raise ValueError(f"Unknown MMG tool: {tool!r} (expected one of {sorted(MMG_TOOL_TO_EXE)})")
-    base = MMG_TOOL_TO_EXE[tool]
+def _solver_0d_exe_filename() -> str:
     if os.name == "nt":
-        return base + ".exe"
-    return base
+        return SOLVER_0D_EXE_BASENAME + ".exe"
+    return SOLVER_0D_EXE_BASENAME
 
 
 def _ensure_executable(path: Path) -> None:
@@ -92,18 +85,18 @@ def _user_cache_dir() -> Optional[Path]:
             base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
             if not base:
                 return None
-            return Path(base) / "svv" / "mmg"
+            return Path(base) / "svv" / "solver_0d"
         base = os.environ.get("XDG_CACHE_HOME")
         if base:
-            return Path(base) / "svv" / "mmg"
-        return Path.home() / ".cache" / "svv" / "mmg"
+            return Path(base) / "svv" / "solver_0d"
+        return Path.home() / ".cache" / "svv" / "solver_0d"
     except Exception:
         return None
 
 
-def _mmg_run_roots() -> Tuple[Path, ...]:
+def _solver_0d_run_roots() -> Tuple[Path, ...]:
     roots: List[Path] = []
-    env_root = os.environ.get("SVV_MMG_RUN_DIR")
+    env_root = os.environ.get("SVV_SOLVER_0D_RUN_DIR")
     if env_root:
         roots.append(Path(env_root).expanduser())
     try:
@@ -137,32 +130,30 @@ def _sha256_short(path: Path) -> Optional[str]:
 
 
 @dataclass(frozen=True)
-class MMGSelection:
-    tool: str
+class Solver0DSelection:
     os_dir: str
     arch: str
     candidates: Tuple[Path, ...]
 
 
-def get_mmg_candidates(
-    tool: str,
+def get_solver_0d_candidates(
     *,
     os_dir: Optional[str] = None,
     arch: Optional[str] = None,
-) -> MMGSelection:
+) -> Solver0DSelection:
     """
-    Return an ordered list of candidate executable paths for the requested MMG tool.
+    Return an ordered list of candidate executable paths for svZeroDSolver.
 
     Search order:
-    1) SVV_MMG_PATH (explicit executable)
-    2) SVV_MMG_DIR/<exe>
+    1) SVV_SOLVER_0D_PATH (explicit executable)
+    2) SVV_SOLVER_0D_DIR/<exe>
     3) svv/bin/<exe> (locally built override)
-    4) bundled: svv/utils/remeshing/<OS>/<arch>/<exe>
-    5) bundled fallbacks (mac): universal2 -> arch -> legacy
-    6) legacy flat paths: svv/utils/remeshing/<OS>/<exe>
+    4) bundled: svv/utils/solvers/0D/<OS>/<arch>/<exe>
+    5) bundled fallbacks (mac): universal2 -> arch aliases
+    6) legacy fallback: svv/solvers/<exe>
     """
     os_dir = os_dir or _norm_os_dir()
-    arch_override = os.environ.get("SVV_MMG_ARCH")
+    arch_override = os.environ.get("SVV_SOLVER_0D_ARCH")
     arch = (arch_override or arch or "").strip()
     if not arch:
         arch = _norm_arch()
@@ -175,46 +166,45 @@ def get_mmg_candidates(
         elif a in {"universal2"}:
             arch = "universal2"
 
-    exe_name = _mmg_exe_filename(tool)
-
-    # Base package dir: .../svv/utils/remeshing
-    remesh_dir = Path(__file__).resolve().parent
+    exe_name = _solver_0d_exe_filename()
+    solvers_dir = Path(__file__).resolve().parent / "0D"
 
     candidates: List[Path] = []
 
-    mmg_path = os.environ.get("SVV_MMG_PATH")
-    if mmg_path:
-        candidates.append(Path(mmg_path).expanduser())
+    solver_path = os.environ.get("SVV_SOLVER_0D_PATH")
+    if solver_path:
+        candidates.append(Path(solver_path).expanduser())
 
-    mmg_dir = os.environ.get("SVV_MMG_DIR")
-    if mmg_dir:
-        candidates.append(Path(mmg_dir).expanduser() / exe_name)
+    solver_dir = os.environ.get("SVV_SOLVER_0D_DIR")
+    if solver_dir:
+        candidates.append(Path(solver_dir).expanduser() / exe_name)
 
-    # svv/bin override if present
     try:
-        import svv  # imported lazily to keep this module lightweight
+        import svv
 
         svv_root = Path(svv.__file__).resolve().parent
         candidates.append(svv_root / "bin" / exe_name)
     except Exception:
         pass
 
-    # Bundled per-platform layout.
-    os_base = remesh_dir / os_dir
+    os_base = solvers_dir / os_dir
     if os_dir == "Mac":
-        # Prefer universal2 if present, then machine arch fallbacks.
         candidates.append(os_base / "universal2" / exe_name)
-        # Fallback: some trees may use x86_64/arm64 or x86_64/aarch64 naming.
         candidates.append(os_base / "x86_64" / exe_name)
         candidates.append(os_base / "arm64" / exe_name)
         candidates.append(os_base / "aarch64" / exe_name)
     else:
         candidates.append(os_base / arch / exe_name)
 
-    # Legacy flat layout (pre-arch split)
-    candidates.append(os_base / exe_name)
+    # Legacy fallback used by older zero_d export code paths.
+    try:
+        import svv
 
-    # De-duplicate while preserving order
+        svv_root = Path(svv.__file__).resolve().parent
+        candidates.append(svv_root / "solvers" / exe_name)
+    except Exception:
+        pass
+
     uniq: List[Path] = []
     seen = set()
     for p in candidates:
@@ -224,22 +214,22 @@ def get_mmg_candidates(
         seen.add(key)
         uniq.append(p)
 
-    return MMGSelection(tool=tool, os_dir=os_dir, arch=arch, candidates=tuple(uniq))
+    return Solver0DSelection(os_dir=os_dir, arch=arch, candidates=tuple(uniq))
 
 
-def get_mmg_exe(tool: str) -> Path:
-    sel = get_mmg_candidates(tool)
+def get_solver_0d_exe() -> Path:
+    sel = get_solver_0d_candidates()
     for p in sel.candidates:
         if p.is_file():
             return p
     tried = "\n  - ".join(str(p) for p in sel.candidates)
     raise FileNotFoundError(
-        f"MMG executable not found for tool={tool!r} (os={sel.os_dir}, arch={sel.arch}). Tried:\n  - {tried}"
+        "svZeroDSolver executable not found "
+        f"(os={sel.os_dir}, arch={sel.arch}). Tried:\n  - {tried}"
     )
 
 
-def run_mmg(
-    tool: str,
+def run_solver_0d(
     args: Sequence[str],
     *,
     stdout=None,
@@ -247,11 +237,11 @@ def run_mmg(
     cwd=None,
 ) -> Path:
     """
-    Execute the requested MMG tool, trying platform/arch candidates as needed.
+    Execute svZeroDSolver using platform/arch candidates as needed.
 
     Returns the Path of the executable that successfully ran.
     """
-    sel = get_mmg_candidates(tool)
+    sel = get_solver_0d_candidates()
     last_exec_error: Optional[BaseException] = None
 
     for exe in sel.candidates:
@@ -266,12 +256,12 @@ def run_mmg(
             raise
         except PermissionError as e:
             # If we can't exec in-place (missing +x, read-only site-packages, or a noexec mount),
-            # try copying the executable into a user-writable run directory and executing from there.
+            # copy the executable into a writable run directory and execute from there.
             last_exec_error = e
             digest = _sha256_short(exe)
-            for root in _mmg_run_roots():
+            for root in _solver_0d_run_roots():
                 try:
-                    base = root / f"svv-mmg-{_uid_suffix()}" / sel.os_dir / sel.arch
+                    base = root / f"svv-solver-0d-{_uid_suffix()}" / sel.os_dir / sel.arch
                     if digest:
                         base = base / digest
                     base.mkdir(parents=True, exist_ok=True)
@@ -309,10 +299,11 @@ def run_mmg(
     tried = "\n  - ".join(str(p) for p in sel.candidates)
     if last_exec_error is not None:
         raise RuntimeError(
-            f"No compatible MMG executable could be executed for tool={tool!r} "
+            "No compatible svZeroDSolver executable could be executed "
             f"(os={sel.os_dir}, arch={sel.arch}). Tried:\n  - {tried}\n"
             f"Last error: {last_exec_error}"
         ) from last_exec_error
     raise FileNotFoundError(
-        f"MMG executable not found for tool={tool!r} (os={sel.os_dir}, arch={sel.arch}). Tried:\n  - {tried}"
+        "svZeroDSolver executable not found "
+        f"(os={sel.os_dir}, arch={sel.arch}). Tried:\n  - {tried}"
     )

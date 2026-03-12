@@ -2,11 +2,10 @@
 VTK/PyVista widget for 3D domain visualization.
 """
 import os
+import platform
 import sys
 
-# macOS: force layer-backed views to prevent OpenGL context deadlocks.
-# On Apple Silicon (especially under conda), VTK's render-window initialization
-# can hang indefinitely when Qt tries to negotiate the GL surface with Cocoa.
+# macOS: force layer-backed views to avoid Qt/VTK view initialization deadlocks.
 if sys.platform == 'darwin':
     os.environ.setdefault('QT_MAC_WANTS_LAYER', '1')
 
@@ -226,18 +225,10 @@ class _OffscreenBlitWidget(QWidget):
     """
     Fallback 3D viewport that renders VTK offscreen and blits frames to a QLabel.
 
-    Used when the normal embedded ``QtInteractor`` hangs during OpenGL context
-    creation (observed on macOS Apple Silicon with conda-installed Qt/VTK).
-    Mouse and wheel events are forwarded to VTK's interactor so the user gets
-    full trackball-camera interaction (rotate, pan, zoom).
-
-    Point picking is implemented via ray casting against mesh geometry rather
-    than VTK's hardware picker (which requires an on-screen OpenGL context).
+    This is used on macOS environments where creating an embedded QtInteractor
+    can hang during OpenGL context initialization.
     """
 
-    # Maximum pixel distance between press and release to count as a "click"
-    # rather than a drag.  Beyond this threshold the event is treated as a
-    # camera manipulation and no pick is attempted.
     _CLICK_TOLERANCE_PX = 5
 
     def __init__(self, plotter, parent=None):
@@ -247,10 +238,7 @@ class _OffscreenBlitWidget(QWidget):
         self._plotter = plotter
         self._QImage = QImage
         self._QPixmap = QPixmap
-
-        # Callable set by VTKWidget to receive picked points.
         self.pick_callback = None
-        # Meshes registered for picking (list of pyvista PolyData/similar).
         self._pickable_meshes = []
 
         self._display = QLabel(self)
@@ -262,11 +250,8 @@ class _OffscreenBlitWidget(QWidget):
 
         self.setMouseTracking(True)
         self._display.setMouseTracking(True)
-
-        # Track press position to distinguish clicks from drags.
         self._press_pos = None
 
-        # Obtain the raw VTK interactor for event forwarding.
         self._vtk_iren = None
         try:
             iren = plotter.iren
@@ -279,15 +264,13 @@ class _OffscreenBlitWidget(QWidget):
         except Exception:
             pass
 
-        # Debounced render timer (~60 fps cap).
         self._blit_timer = QTimer(self)
         self._blit_timer.setSingleShot(True)
         self._blit_timer.timeout.connect(self.blit)
 
-        # Hook into VTK render events so that any plotter.render() call
-        # (from add_mesh, camera changes, etc.) auto-updates the display.
         try:
             import vtk as _vtk
+
             plotter.ren_win.AddObserver(
                 _vtk.vtkCommand.RenderEvent,
                 lambda _obj, _ev: self.schedule_blit(),
@@ -295,61 +278,49 @@ class _OffscreenBlitWidget(QWidget):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Display
-    # ------------------------------------------------------------------
-
     def blit(self):
-        """Capture the offscreen framebuffer and paint it on the QLabel."""
+        """Capture the offscreen framebuffer and display it in the label."""
         try:
             img = self._plotter.screenshot(return_img=True)
             if img is None:
                 return
             h, w, ch = img.shape
             qimg = self._QImage(
-                img.tobytes(), w, h, w * ch, self._QImage.Format.Format_RGB888,
+                img.tobytes(),
+                w,
+                h,
+                w * ch,
+                self._QImage.Format.Format_RGB888,
             )
             self._display.setPixmap(self._QPixmap.fromImage(qimg))
         except Exception:
             pass
 
     def schedule_blit(self, delay_ms=16):
-        """Request a (debounced) display refresh."""
+        """Request a debounced framebuffer copy."""
         if not self._blit_timer.isActive():
             self._blit_timer.start(delay_ms)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        s = event.size()
-        w, h = s.width(), s.height()
-        if w > 0 and h > 0:
+        size = event.size()
+        width, height = size.width(), size.height()
+        if width > 0 and height > 0:
             try:
-                self._plotter.window_size = (w, h)
+                self._plotter.window_size = (width, height)
             except Exception:
                 pass
             self.schedule_blit()
 
-    # ------------------------------------------------------------------
-    # Ray-cast picking (replaces VTK hardware picker)
-    # ------------------------------------------------------------------
-
     def _ray_pick(self, display_x, display_y):
-        """Cast a ray from the camera through *display_x*, *display_y* and
-        return the closest intersection point on any pickable mesh, or
-        ``None`` if nothing was hit.
-        """
+        """Return the closest ray-hit point on a registered pickable mesh."""
         try:
             import vtk as _vtk
 
             renderer = self._plotter.renderer
-
-            # Convert display coords to world coords using VTK's coordinate
-            # transform (respects the current camera / projection matrix).
             coord = _vtk.vtkCoordinate()
             coord.SetCoordinateSystemToDisplay()
-            # VTK display coords are y-up; Qt display coords are y-down.
-            win_h = self._plotter.window_size[1]
-            coord.SetValue(float(display_x), float(win_h - display_y), 0.0)
+            coord.SetValue(float(display_x), float(self._plotter.window_size[1] - display_y), 0.0)
             world = np.array(coord.GetComputedWorldValue(renderer))
 
             cam_pos = np.array(self._plotter.camera.position)
@@ -362,26 +333,21 @@ class _OffscreenBlitWidget(QWidget):
 
             best_point = None
             best_dist = float('inf')
-
             for mesh in self._pickable_meshes:
                 try:
-                    pts, _ = mesh.ray_trace(cam_pos, ray_end)
-                    if pts is not None and len(pts) > 0:
-                        dists = np.linalg.norm(pts - cam_pos, axis=1)
-                        idx = int(np.argmin(dists))
-                        if dists[idx] < best_dist:
-                            best_dist = dists[idx]
-                            best_point = pts[idx]
+                    points, _ = mesh.ray_trace(cam_pos, ray_end)
+                    if points is None or len(points) == 0:
+                        continue
+                    dists = np.linalg.norm(points - cam_pos, axis=1)
+                    idx = int(np.argmin(dists))
+                    if dists[idx] < best_dist:
+                        best_dist = dists[idx]
+                        best_point = points[idx]
                 except Exception:
                     continue
-
             return best_point
         except Exception:
             return None
-
-    # ------------------------------------------------------------------
-    # Mouse / wheel event forwarding to VTK
-    # ------------------------------------------------------------------
 
     def _get_pos(self, event):
         pt = event.position().toPoint() if hasattr(event, 'position') else event.pos()
@@ -400,12 +366,12 @@ class _OffscreenBlitWidget(QWidget):
         if self._vtk_iren is None:
             return
         self._forward_pos(event)
-        btn = event.button()
-        if btn == Qt.MouseButton.LeftButton:
+        button = event.button()
+        if button == Qt.MouseButton.LeftButton:
             self._vtk_iren.LeftButtonPressEvent()
-        elif btn == Qt.MouseButton.RightButton:
+        elif button == Qt.MouseButton.RightButton:
             self._vtk_iren.RightButtonPressEvent()
-        elif btn == Qt.MouseButton.MiddleButton:
+        elif button == Qt.MouseButton.MiddleButton:
             self._vtk_iren.MiddleButtonPressEvent()
         self.schedule_blit()
 
@@ -414,16 +380,14 @@ class _OffscreenBlitWidget(QWidget):
 
         if self._vtk_iren is not None:
             self._forward_pos(event)
-            btn = event.button()
-            if btn == Qt.MouseButton.LeftButton:
+            button = event.button()
+            if button == Qt.MouseButton.LeftButton:
                 self._vtk_iren.LeftButtonReleaseEvent()
-            elif btn == Qt.MouseButton.RightButton:
+            elif button == Qt.MouseButton.RightButton:
                 self._vtk_iren.RightButtonReleaseEvent()
-            elif btn == Qt.MouseButton.MiddleButton:
+            elif button == Qt.MouseButton.MiddleButton:
                 self._vtk_iren.MiddleButtonReleaseEvent()
 
-        # Detect a click (small movement between press and release) and
-        # fire a ray-cast pick for left-button clicks.
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self._press_pos is not None
@@ -447,7 +411,7 @@ class _OffscreenBlitWidget(QWidget):
             return
         self._forward_pos(event)
         self._vtk_iren.MouseMoveEvent()
-        if event.buttons():  # any button held → dragging
+        if event.buttons():
             self.schedule_blit()
 
     def wheelEvent(self, event):
@@ -461,7 +425,7 @@ class _OffscreenBlitWidget(QWidget):
         self.schedule_blit()
 
     def stop(self):
-        """Stop the blit timer (call before shutdown)."""
+        """Stop the blit timer before shutting down."""
         try:
             self._blit_timer.stop()
         except Exception:
@@ -570,24 +534,12 @@ class VTKWidget(QWidget):
             return
         self._plotter_init_in_progress = True
         # Schedule after the event loop starts to avoid platform-specific hangs.
-        # A short delay (200ms) gives macOS Cocoa time to fully realize the
-        # native window and its OpenGL surface before VTK tries to acquire a
-        # rendering context — singleShot(0) fires too early on Apple Silicon.
         delay_ms = 200 if sys.platform == 'darwin' else 0
         QTimer.singleShot(delay_ms, self._init_plotter)
 
     @staticmethod
     def _should_use_offscreen():
-        """Return True when the embedded QtInteractor is known to hang.
-
-        On macOS Apple Silicon with conda-installed Qt/VTK the Cocoa
-        OpenGL context negotiation deadlocks the main thread.  In that
-        situation we fall back to offscreen rendering + blit.
-
-        Override with environment variables:
-          SVV_GUI_FORCE_EMBEDDED_VTK=1  – always try the embedded path
-          SVV_GUI_FORCE_OFFSCREEN_VTK=1 – always use the offscreen path
-        """
+        """Return True only for the known-bad macOS ARM + conda environment."""
         def _env_true(name):
             return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -595,19 +547,17 @@ class VTKWidget(QWidget):
             return False
         if _env_true("SVV_GUI_FORCE_OFFSCREEN_VTK"):
             return True
-        # macOS + conda is the known-bad combination.
-        if sys.platform == "darwin" and os.environ.get("CONDA_PREFIX"):
-            return True
-        return False
+        return (
+            sys.platform == "darwin"
+            and platform.machine().lower() == "arm64"
+            and bool(os.environ.get("CONDA_PREFIX"))
+        )
 
     def _init_plotter(self):
         if self._plotter_init_done or self._plotter_init_failed:
             self._plotter_init_in_progress = False
             return
 
-        # ------------------------------------------------------------------
-        # 1. Import PyVista (common to both paths)
-        # ------------------------------------------------------------------
         try:
             import pyvista as _pv
         except Exception as e:
@@ -627,12 +577,7 @@ class VTKWidget(QWidget):
         except Exception:
             pass
 
-        # ------------------------------------------------------------------
-        # 2. Create the plotter (embedded QtInteractor vs offscreen + blit)
-        # ------------------------------------------------------------------
-        use_offscreen = self._should_use_offscreen()
-
-        if use_offscreen:
+        if self._should_use_offscreen():
             self._init_plotter_offscreen(_pv)
         else:
             self._init_plotter_embedded(_pv)
@@ -640,15 +585,10 @@ class VTKWidget(QWidget):
         if self.plotter is None or self._plotter_init_failed:
             return
 
-        # ------------------------------------------------------------------
-        # 3. Common post-init configuration
-        # ------------------------------------------------------------------
         self._setup_plotter_common()
 
-    # ---- Embedded (normal) path ------------------------------------------
-
     def _init_plotter_embedded(self, _pv):
-        """Create an embedded QtInteractor (the normal, non-macOS path)."""
+        """Create the standard embedded PyVista Qt interactor."""
         try:
             from pyvistaqt import QtInteractor as _QtInteractor
         except Exception as e:
@@ -673,15 +613,8 @@ class VTKWidget(QWidget):
                 "conda install -c conda-forge mesalib"
             )
 
-    # ---- Offscreen + blit path (macOS Apple Silicon / conda) -------------
-
     def _init_plotter_offscreen(self, _pv):
-        """Create an offscreen PyVista plotter and blit frames to a QLabel.
-
-        This avoids the OpenGL-context deadlock that occurs when
-        ``pyvistaqt.QtInteractor`` is constructed on macOS Apple Silicon
-        with conda-installed Qt/VTK.
-        """
+        """Create an offscreen plotter for the known-bad macOS environment."""
         try:
             self.plotter = _pv.Plotter(off_screen=True, window_size=(800, 600))
         except Exception as e:
@@ -693,19 +626,12 @@ class VTKWidget(QWidget):
         self._layout.addWidget(self._blit_widget)
         self._remove_placeholder()
 
-    # ---- Shared post-init setup ------------------------------------------
-
     def _setup_plotter_common(self):
-        """Picking, background, lighting, axes — shared by both init paths."""
-        # ----- Picking setup -----
+        """Apply shared plotter setup after either init path succeeds."""
         if self._offscreen_mode:
-            # In offscreen mode VTK's hardware picker is unavailable (no GL
-            # context).  The _OffscreenBlitWidget uses ray-casting instead.
-            # Wire its callback to the same handler used by the embedded path.
             if self._blit_widget is not None:
                 self._blit_widget.pick_callback = self._on_point_picked
         else:
-            # Embedded path: use VTK's hardware-accelerated surface picker.
             selection_color = CADTheme.get_color('viewport', 'selection')
             try:
                 self.plotter.enable_surface_point_picking(
@@ -730,12 +656,11 @@ class VTKWidget(QWidget):
                             callback=self._on_point_picked,
                             show_message=False,
                             color=selection_color,
-                            point_size=14,
+                            point_size=14
                         )
                     except Exception:
                         pass
 
-        # Apply CAD-theme gradient background
         bg_bottom = CADTheme.get_color('viewport', 'background-bottom')
         bg_top = CADTheme.get_color('viewport', 'background-top')
         self.plotter.set_background(bg_bottom, top=bg_top)
@@ -748,29 +673,21 @@ class VTKWidget(QWidget):
         except Exception:
             pass
         self.plotter.show_axes()
-
-        # Initial camera setup
         self.plotter.camera_position = 'iso'
-
-        # Add scale bar/ruler for real-world dimensions
         self._init_scale_bar()
-
-        # If a domain was set before the plotter was ready, render it now.
         if self.domain is not None:
             try:
                 self.set_domain(self.domain)
             except Exception:
                 pass
-
-        # Trigger an initial blit for the offscreen path.
-        if getattr(self, '_blit_widget', None) is not None:
+        if self._blit_widget is not None:
             self._blit_widget.schedule_blit(delay_ms=50)
 
         self._plotter_init_done = True
         self._plotter_init_in_progress = False
 
     def _remove_placeholder(self):
-        """Remove the 'Initializing 3D viewport...' placeholder label."""
+        """Remove the initial viewport placeholder."""
         if getattr(self, "_vtk_placeholder", None) is not None:
             try:
                 self._layout.removeWidget(self._vtk_placeholder)
@@ -783,20 +700,13 @@ class VTKWidget(QWidget):
             self._vtk_placeholder = None
 
     def _show_vtk_error(self, message: str):
-        """Replace the placeholder with an error message and mark init as failed."""
+        """Replace the placeholder with a static error label."""
         error_label = QLabel(message)
         error_label.setWordWrap(True)
-        error_label.setStyleSheet("padding: 20px; background-color: #FFF3CD; border: 1px solid #FFC107;")
-        if getattr(self, "_vtk_placeholder", None) is not None:
-            try:
-                self._layout.removeWidget(self._vtk_placeholder)
-            except Exception:
-                pass
-            try:
-                self._vtk_placeholder.deleteLater()
-            except Exception:
-                pass
-            self._vtk_placeholder = None
+        error_label.setStyleSheet(
+            "padding: 20px; background-color: #FFF3CD; border: 1px solid #FFC107;"
+        )
+        self._remove_placeholder()
         self._layout.addWidget(error_label)
         self.plotter = None
         self._plotter_init_failed = True
@@ -809,7 +719,6 @@ class VTKWidget(QWidget):
         This clears all actors and closes the underlying QtInteractor so that
         GPU/CPU memory is returned promptly.
         """
-        # Stop offscreen blit timer if present
         if getattr(self, '_blit_widget', None) is not None:
             self._blit_widget.stop()
 
@@ -1044,6 +953,8 @@ class VTKWidget(QWidget):
             return
 
         self.clear()
+        if self._offscreen_mode and self._blit_widget is not None:
+            self._blit_widget._pickable_meshes = []
 
         # Add domain boundary if available
         if hasattr(domain, 'boundary') and domain.boundary is not None:
@@ -1060,7 +971,6 @@ class VTKWidget(QWidget):
                 smooth_shading=True,
                 name='domain'
             )
-            # Register the mesh for ray-cast picking in offscreen mode.
             if self._offscreen_mode and self._blit_widget is not None:
                 self._blit_widget._pickable_meshes = [domain.boundary]
 
@@ -1249,14 +1159,32 @@ class VTKWidget(QWidget):
         if not self.plotter:
             return []
 
-        from svv.visualize.batch_cylinders import tree_to_merged_mesh
-
+        actors = []
         base = label or f"tree_{len(self.tree_actors)}"
-        merged = tree_to_merged_mesh(tree, resolution=8)
-        if merged is None:
-            return []
-        actor = self.plotter.add_mesh(merged, color=color, name=f'{base}_merged')
-        actors = [actor]
+        for i in range(tree.data.shape[0]):
+            center = (tree.data[i, 0:3] + tree.data[i, 3:6]) / 2
+            direction = tree.data.get('w_basis', i)
+            radius = tree.data.get('radius', i)
+            length = tree.data.get('length', i)
+
+            vessel = self._pv.Cylinder(
+                center=center,
+                direction=direction,
+                radius=radius,
+                height=length
+            )
+            actor = self.plotter.add_mesh(
+                vessel,
+                color=color,
+                name=f'{base}_vessel_{i}'
+            )
+            actors.append(actor)
+            # Periodically process Qt events to keep the GUI responsive
+            if i % 100 == 0:
+                try:
+                    QApplication.processEvents()
+                except Exception:
+                    pass
 
         self.tree_actors.extend(actors)
         if group_id is not None:
@@ -1280,16 +1208,26 @@ class VTKWidget(QWidget):
             return []
         if not self.plotter:
             return []
-
-        from svv.visualize.batch_cylinders import segments_to_merged_mesh
-
+        actors = []
         base = label or f"connection_{len(self.connection_actors)}"
-        merged = segments_to_merged_mesh(np.asarray(vessels), resolution=8)
-        if merged is None:
-            return []
-        actor = self.plotter.add_mesh(merged, color=color, name=f"{base}_merged")
-        actors = [actor]
-
+        for idx, seg in enumerate(vessels):
+            p0 = seg[0:3]
+            p1 = seg[3:6]
+            radius = seg[6]
+            direction = p1 - p0
+            length = np.linalg.norm(direction)
+            if length <= 0:
+                continue
+            direction = direction / length
+            center = (p0 + p1) / 2
+            cyl = self._pv.Cylinder(center=center, direction=direction, radius=radius, height=length)
+            actor = self.plotter.add_mesh(cyl, color=color, name=f"{base}_seg_{idx}")
+            actors.append(actor)
+            if idx % 200 == 0:
+                try:
+                    QApplication.processEvents()
+                except Exception:
+                    pass
         self.connection_actors.extend(actors)
         if group_id is not None:
             self.connection_actor_groups[group_id] = actors

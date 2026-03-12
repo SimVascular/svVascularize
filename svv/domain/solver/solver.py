@@ -1,13 +1,27 @@
 import numpy as np
 from scipy import optimize
 from functools import partial
-from ..kernel.coordinate_system import sph2cart
+from ..kernel.coordinate_system import angles_to_cartesian
 
 
 class DomainSolution:
     def __init__(self):
         self.x = None
         self.fun = None
+
+
+def constants_from_cartesian(kernel, cartesian_solution):
+    g = np.asarray(cartesian_solution, dtype=np.float64).reshape(-1)
+    if kernel.lam == 0:
+        s = np.zeros(kernel.n, dtype=np.float64)
+    else:
+        rhs = kernel.j01_ @ g
+        system = np.eye(kernel.j00_.shape[0], dtype=np.float64) + kernel.lam * kernel.j00_
+        s = -kernel.lam * np.linalg.solve(system, rhs)
+    left_side = np.zeros(kernel.a_inv.shape[0], dtype=np.float64)
+    left_side[:kernel.n] = s
+    left_side[kernel.n:kernel.n + g.shape[0]] = g
+    return kernel.a_inv @ left_side
 
 
 class Solver:
@@ -81,28 +95,11 @@ class Solver:
         if self.solution is None:
             print('Solver not run.')
             return None
-        spherical_solution = np.ones((self.kernel.n, self.kernel.d))
-        spherical_solution[:, 1:] = self.solution.x.reshape(self.kernel.n, self.kernel.d - 1)
-        cartesian_solution = sph2cart(spherical_solution)
-        g = cartesian_solution.flatten()
-        if self.kernel.lam == 0:
-            s = np.zeros(self.kernel.n)
-        else:
-            s = -self.kernel.lam * np.linalg.inv(
-                np.eye(self.kernel.j00_.shape[0]) + self.kernel.lam * self.kernel.j00_) @ \
-                self.kernel.j01_ @ g
-        left_side = np.zeros(self.kernel.a_inv.shape[0])
-        left_side[:self.kernel.n] = s
-        left_side[self.kernel.n:self.kernel.n + g.shape[0]] = g
-        constants = self.kernel.a_inv @ left_side
-        return constants
+        cartesian_solution = angles_to_cartesian(self.solution.x.reshape(self.kernel.n, self.kernel.d - 1))
+        return constants_from_cartesian(self.kernel, cartesian_solution)
 
     def get_normals(self):
         if self.solution is None:
             print('Solver not run.')
             return None
-        spherical_solution = np.ones((self.kernel.n, self.kernel.d))
-        spherical_solution[:, 1:] = self.solution.x.reshape(self.kernel.n, self.kernel.d - 1)
-        cartesian_solution = sph2cart(spherical_solution)
-        normals = cartesian_solution
-        return normals
+        return angles_to_cartesian(self.solution.x.reshape(self.kernel.n, self.kernel.d - 1))

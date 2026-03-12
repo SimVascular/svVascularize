@@ -1,0 +1,19 @@
+numpy>=1.24; python_version < "3.12"
+numpy>=1.26; python_version >= "3.12"
+scipy>=1.10.1; python_version < "3.12"
+scipy>=1.12.0; python_version >= "3.12"
+matplotlib>=3.7.5; python_version < "3.12"
+matplotlib>=3.8; python_version >= "3.12"
+tqdm
+usearch
+numexpr
+scikit-image
+scikit-learn
+tetgen<0.8.0; python_version < "3.12"
+tetgen>=0.8.0; python_version >= "3.12"
+trimesh
+meshio
+pymeshfix==0.17.0
+pyvista>=0.44.2
+vtk
+psutil>=5.9.0

@@ -1,6 +1,25 @@
 import numpy as np
 
 
+def angles_to_cartesian(angles):
+    """Convert angular spherical coordinates with unit radius to Cartesian coordinates."""
+    angles = np.asarray(angles, dtype=np.float64)
+    n = angles.shape[0]
+    angle_count = angles.shape[1]
+    cart = np.empty((n, angle_count + 1), dtype=np.float64)
+    if angle_count == 0:
+        cart[:, 0] = 1.0
+        return cart
+    sin_angles = np.sin(angles)
+    cos_angles = np.cos(angles)
+    prefix_sines = np.ones((n, angle_count), dtype=np.float64)
+    if angle_count > 1:
+        prefix_sines[:, 1:] = np.cumprod(sin_angles[:, :-1], axis=1)
+    cart[:, :-1] = prefix_sines * cos_angles
+    cart[:, -1] = np.prod(sin_angles, axis=1)
+    return cart
+
+
 def cart2sph(cart):
     r"""
     Convert Cartesian coordinates to spherical coordinates.
@@ -193,41 +212,9 @@ def sph2cart(sph):
         # array([[1., 1., 1.],
         #        [1., 0., 0.]])
     """
-    n = sph.shape[0]
-    d = sph.shape[1]
-    cart = np.zeros((n, d))
-    for i in range(n):
-        if np.isclose(sph[i, 1], np.pi/2) or np.isclose(sph[i, 1], -np.pi/2) or np.isclose(sph[i, 1], (3/2)*np.pi):
-            cart[i, 0] = 0
-        else:
-            cart[i, 0] = sph[i, 0] * np.cos(sph[i, 1])
-        for j in range(max(d - 2, 0)):
-            if np.any(np.isclose(sph[i, 1:j + 2], np.pi)) or np.any(np.isclose(sph[i, 1:j + 2], -np.pi)) or \
-                    np.any(np.isclose(sph[i, 1:j + 2], 0)):
-                cart[i, j + 1] = 0
-            elif np.isclose(sph[i, j + 2], np.pi/2) or np.isclose(sph[i, j + 2], -np.pi/2) or \
-                    np.isclose(sph[i, j + 2], (3/2)*np.pi):
-                cart[i, j + 1] = 0
-            else:
-                p_ones = np.isclose(sph[i, 1:j+2], np.pi/2)
-                n_ones = np.logical_or(np.isclose(sph[i, 1:j+2], -np.pi/2), np.isclose(sph[i, 1:j+2], (3/2)*np.pi))
-                sins = np.sin(sph[i, 1:j+2])
-                sins[p_ones] = 1
-                sins[n_ones] = -1
-                if np.isclose(sph[i, j + 2], 0):
-                    cos = 1
-                elif np.isclose(sph[i, j + 2], np.pi) or np.isclose(sph[i, j + 2], -np.pi):
-                    cos = -1
-                else:
-                    cos = np.cos(sph[i, j + 2])
-                cart[i, j + 1] = sph[i, 0] * np.prod(sins) * cos
-        if np.any(np.isclose(sph[i, 1:], np.pi)) or np.any(np.isclose(sph[i, 1:], -np.pi)):
-            cart[i, -1] = 0
-        else:
-            p_ones = np.isclose(sph[i, 1:], np.pi/2)
-            n_ones = np.isclose(sph[i, 1:], -np.pi/2)
-            sins = np.sin(sph[i, 1:])
-            sins[p_ones] = 1
-            sins[n_ones] = -1
-            cart[i, -1] = sph[i, 0] * np.prod(sins)
+    sph = np.asarray(sph, dtype=np.float64)
+    if sph.shape[1] == 1:
+        return sph.copy()
+    cart = angles_to_cartesian(sph[:, 1:])
+    cart *= sph[:, :1]
     return cart

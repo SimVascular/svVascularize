@@ -1,5 +1,5 @@
 import numpy as np
-from .coordinate_system import sph2cart
+from .coordinate_system import angles_to_cartesian
 
 
 def cost(x, h_, n, d):
@@ -154,10 +154,6 @@ def cost(x, h_, n, d):
     sph2cart : Convert spherical coordinates to Cartesian coordinates.
 
     """
-    g = np.ones((n, d))
-    g[:, 1:] = x.reshape(n, d - 1)
-    a = sph2cart(g)
-    a = a.reshape((n * d, 1))
-    c = a.T @ h_ @ a
-    c = c.flatten()
-    return c
+    a = angles_to_cartesian(np.asarray(x, dtype=np.float64).reshape(n, d - 1))
+    a = a.reshape(n * d)
+    return float(a @ h_ @ a)

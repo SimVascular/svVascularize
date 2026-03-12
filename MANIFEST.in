@@ -14,6 +14,13 @@ recursive-include svv/utils/remeshing/Mac/universal2 *
 recursive-include svv/utils/remeshing/Mac/x86_64 *
 recursive-include svv/utils/remeshing/Windows/x86_64 *
 
+# Include 0D solver executables (arch-aware layout)
+recursive-include svv/utils/solvers/0D/Linux/x86_64 *
+recursive-include svv/utils/solvers/0D/Linux/aarch64 *
+recursive-include svv/utils/solvers/0D/Mac/universal2 *
+recursive-include svv/utils/solvers/0D/Mac/x86_64 *
+recursive-include svv/utils/solvers/0D/Windows/x86_64 *
+
 # Include locally-built tools (optional; used by some dev/CI flows)
 recursive-include svv/bin *
  

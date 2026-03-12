@@ -1,7 +1,6 @@
 import numpy as np
 from typing import Tuple
 from itertools import combinations
-from time import perf_counter
 import scipy.spatial as spatial
 import tqdm
 from .c_allocate import (
@@ -10,8 +9,28 @@ from .c_allocate import (
     any_value_double,
     duplicate_map,
     _allocate_patch,
-    _allocate_angle
+    _allocate_angle,
 )
+
+
+_ANGLE_SCALE = 180.0 / np.pi
+
+
+def _as_index_array(indices: np.ndarray) -> np.ndarray:
+    array = np.asarray(indices, dtype=np.int64)
+    if array.ndim == 0:
+        return array.reshape(1)
+    return array
+
+
+def _deduplicate_indices(indices: np.ndarray, unique_inverse: np.ndarray) -> np.ndarray:
+    indices = _as_index_array(indices)
+    if indices.shape[0] <= 1:
+        return indices
+    _, unique_positions = np.unique(unique_inverse[indices], return_index=True)
+    if unique_positions.shape[0] == indices.shape[0]:
+        return indices
+    return indices[np.sort(unique_positions)]
 
 
 # [TODO] the allocator needs to be accelerated to handle large point clouds
@@ -60,97 +79,99 @@ def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_
             normals = normals[indices, :]
             magnitudes = norm(normals)
         normals = normals / magnitudes
-    unique_points, unique_inverse, unique_counts = np.unique(points, axis=0, return_inverse=True, return_counts=True)
-    max_duplicates = np.max(unique_counts)
+
+    _, unique_inverse, unique_counts = np.unique(points, axis=0, return_inverse=True, return_counts=True)
     duplicates, duplicate_set = duplicate_map(unique_inverse, unique_counts)
     has_duplicates = len(duplicates) > 0
+
     if normals is None:
         if has_duplicates:
             print("Warning: Duplicate points found with no normals provided.")
             print("Removing duplicate points...")
             print("Done.")
-    else:
-        if has_duplicates:
-            remove_duplicates = []
-            for key in duplicates.keys():
-                repeated_indices = duplicates[key]
-                repeated_normals = normals[repeated_indices, :]
-                comb = combinations(list(range(repeated_normals.shape[0])), 2)
-                for i, j in comb:
-                    dot = np.dot(repeated_normals[i, :], repeated_normals[j, :])
-                    dot = np.clip(dot, -1, 1)
-                    angle = np.arccos(dot) * (180 / np.pi)
-                    if not np.isclose(angle, 0):
-                        if angle < feature_angle:
-                            feature_angle = angle
-                    else:
-                        print("Error: Duplicate points with identical normals found.")
-                        print('Points:\n{} \nRepeated Normals:\n{}\nAngle:{}\nCombination:{}'.format(points[repeated_indices, :], repeated_normals,angle,tuple([i,j])))
-                        print("Removing duplicate point and normal {}...".format(repeated_indices[j]))
-                        remove_duplicates.append(repeated_indices[j])
-                        duplicate_set.remove(repeated_indices[j])
-                        duplicates[key].remove(repeated_indices[j])
-            if len(remove_duplicates) > 0:
-                idx = np.arange(points.shape[0]).tolist()
-                for i in remove_duplicates:
-                    idx.remove(i)
-                points = points[idx, :]
-                normals = normals[idx, :]
+    elif has_duplicates:
+        remove_duplicates = []
+        for key in duplicates.keys():
+            repeated_indices = duplicates[key]
+            repeated_normals = normals[repeated_indices, :]
+            comb = combinations(list(range(repeated_normals.shape[0])), 2)
+            for i, j in comb:
+                dot = np.dot(repeated_normals[i, :], repeated_normals[j, :])
+                dot = np.clip(dot, -1, 1)
+                angle = np.arccos(dot) * _ANGLE_SCALE
+                if not np.isclose(angle, 0):
+                    if angle < feature_angle:
+                        feature_angle = angle
+                else:
+                    print("Error: Duplicate points with identical normals found.")
+                    print('Points:\n{} \nRepeated Normals:\n{}\nAngle:{}\nCombination:{}'.format(
+                        points[repeated_indices, :], repeated_normals, angle, tuple([i, j])))
+                    print("Removing duplicate point and normal {}...".format(repeated_indices[j]))
+                    remove_duplicates.append(repeated_indices[j])
+                    duplicate_set.remove(repeated_indices[j])
+                    duplicates[key].remove(repeated_indices[j])
+        if len(remove_duplicates) > 0:
+            keep_mask = np.ones(points.shape[0], dtype=bool)
+            keep_mask[np.unique(np.asarray(remove_duplicates, dtype=np.int64))] = False
+            points = points[keep_mask, :]
+            normals = normals[keep_mask, :]
+
+    _, unique_inverse, unique_counts = np.unique(points, axis=0, return_inverse=True, return_counts=True)
+    duplicates, duplicate_set = duplicate_map(unique_inverse, unique_counts)
     kdtree = spatial.cKDTree(points)
     overlap = np.clip(overlap, 0, 1)
     max_patch_size = np.min([max_patch_size, points.shape[0]])
-    min_patch_size = np.min([min_patch_size, max_patch_size//2])
+    min_patch_size = np.min([min_patch_size, max_patch_size // 2])
     patch_points = []
     patch_normals = []
-    point_list = np.arange(points.shape[0]).tolist()
-    point_set = set(point_list)
+    point_set = set(np.arange(points.shape[0]).tolist())
     remaining_points = []
+    _, neighbor_indices = kdtree.query(points, k=max_patch_size)
+    neighbor_indices = np.asarray(neighbor_indices, dtype=np.int64)
+    if neighbor_indices.ndim == 1:
+        neighbor_indices = neighbor_indices[:, np.newaxis]
+
     progress_bar = tqdm.tqdm(total=len(point_set), desc='Allocating patches', unit='point', leave=False)
     while len(point_set) > 0:
         progress_start = len(point_set)
         point_idx = point_set.pop()
-        _, indices = kdtree.query(points[point_idx, :], k=max_patch_size)
+        indices = neighbor_indices[point_idx, :]
         if normals is not None:
-            dots = np.dot(normals[point_idx, :], normals[indices, :].T)
-            dots = np.clip(dots, -1, 1)
-            angles = np.arccos(dots) * (180 / np.pi)
-            indices = np.array(_allocate_angle(point_idx, indices, points[indices, :], normals[indices, :],
-                                               feature_angle)).astype(np.int64)
-            _, unique_indices = np.unique(points[indices, :], axis=0, return_index=True)
-            unique_indices = np.sort(unique_indices)
-            indices = indices[unique_indices]
+            indices = np.asarray(
+                _allocate_angle(point_idx, indices, points[indices, :], normals[indices, :], feature_angle),
+                dtype=np.int64,
+            )
+            indices = _deduplicate_indices(indices, unique_inverse)
         if len(indices) < min_patch_size:
             remaining_points.append(point_idx)
             continue
+        patch_points.append(points[indices, :])
+        if normals is not None:
+            patch_normals.append(normals[indices, :])
         else:
-            patch_points.append(points[indices, :])
-            if normals is not None:
-                patch_normals.append(normals[indices, :])
-            else:
-                patch_normals.append(None)
-            point_set = _allocate_patch(indices, overlap, point_set, duplicate_set)
+            patch_normals.append(None)
+        point_set = _allocate_patch(indices, overlap, point_set, duplicate_set)
         progress_end = len(point_set)
         progress_bar.update(progress_start - progress_end)
     progress_bar.close()
+
     progress_bar = tqdm.tqdm(total=len(remaining_points), desc='Allocating remaining patches', unit='point', leave=False)
     while len(remaining_points) > 0:
         progress_start = len(remaining_points)
         point_idx = remaining_points.pop()
-        _, indices = kdtree.query(points[point_idx, :], k=max_patch_size)
+        indices = neighbor_indices[point_idx, :]
         if normals is not None:
             dots = np.dot(normals[point_idx, :], normals[indices, :].T)
             dots = np.clip(dots, -1, 1)
-            angles = np.arccos(dots) * (180 / np.pi)
-            if np.sum(angles < 180) >= 3:
-                indices = np.array(_allocate_angle(point_idx, indices, points[indices, :], normals[indices, :],
-                                                   feature_angle)).astype(np.int64)
-                _, unique_indices = np.unique(points[indices, :], axis=0, return_index=True)
-                unique_indices = np.sort(unique_indices)
-                indices = indices[unique_indices]
+            angles = np.arccos(dots) * _ANGLE_SCALE
+            if np.count_nonzero(angles < 180) >= 3:
+                indices = np.asarray(
+                    _allocate_angle(point_idx, indices, points[indices, :], normals[indices, :], feature_angle),
+                    dtype=np.int64,
+                )
+                indices = _deduplicate_indices(indices, unique_inverse)
             else:
-                _, unique_indices = np.unique(points[indices, :], axis=0, return_index=True)
-                unique_indices = np.sort(unique_indices)
-                indices = indices[unique_indices]
+                indices = _deduplicate_indices(indices, unique_inverse)
                 indices = indices[:3]
         patch_points.append(points[indices, :])
         if normals is not None:

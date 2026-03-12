@@ -35,7 +35,7 @@
 
 /* ── Copy-to-clipboard for <pre data-copy> blocks ── */
 document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('pre[data-copy]')
+  document.querySelectorAll('pre[data-copy]:not(.no-copy)')
     .forEach(block => block.addEventListener('click', () => {
       navigator.clipboard.writeText(block.innerText.trim())
         .then(() => {
@@ -119,7 +119,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Auto-enable copy-to-clipboard on code blocks
-  document.querySelectorAll('pre').forEach(pre => pre.setAttribute('data-copy', ''));
+  document.querySelectorAll('pre:not(.no-copy)').forEach(pre => pre.setAttribute('data-copy', ''));
 
   // Smooth anchor scrolling with header offset
   function scrollWithOffset(e) {

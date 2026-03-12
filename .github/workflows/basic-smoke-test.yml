@@ -67,10 +67,22 @@ jobs:
             python .github/scripts/build_mmg.py --version 5.8.0 --arch x86_64 --jobs 2
           fi
 
+      - name: Build svZeroDSolver (v3.0, Release)
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            python .github/scripts/build_0d.py --version 3.0 --arch universal2 --jobs 2
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            python .github/scripts/build_0d.py --version 3.0 --arch x86_64 --jobs 2
+          else
+            python .github/scripts/build_0d.py --version 3.0 --arch x86_64 --jobs 2
+          fi
+
       - name: Install svVascularize
         env:
           SVV_REQUIRE_MMG: "1"
+          SVV_REQUIRE_SOLVER_0D: "1"
           SVV_MMG_ARCH: ${{ runner.os == 'macOS' && 'universal2' || '' }}
+          SVV_SOLVER_0D_ARCH: ${{ runner.os == 'macOS' && 'universal2' || '' }}
         run: |
           python -m pip install .
 
@@ -86,6 +98,7 @@ jobs:
           os.chdir(tempfile.mkdtemp(prefix="svv-mmg-verify-"))
 
           from svv.utils.remeshing.mmg import get_mmg_exe
+          from svv.utils.solvers.solver_0d import get_solver_0d_exe
 
           for tool in ("mmg2d", "mmg3d", "mmgs"):
             exe = get_mmg_exe(tool)
@@ -103,6 +116,20 @@ jobs:
               check=False,
             )
             print(f"{tool} -h exit: {proc.returncode}", flush=True)
+
+          solver_0d = get_solver_0d_exe()
+          print(f"svzerodsolver -> {solver_0d}", flush=True)
+          if os.name != "nt" and not os.access(solver_0d, os.X_OK):
+            raise SystemExit(f"{solver_0d} is not marked executable")
+
+          proc = subprocess.run(
+            [str(solver_0d), "-h"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+          )
+          print(f"svzerodsolver -h exit: {proc.returncode}", flush=True)
           PY
 
       - name: Run basic smoke test

@@ -117,6 +117,7 @@ def main() -> None:
     from svv.tree.tree import Tree
     from svv.simulation.simulation import Simulation
     from svv.utils.remeshing.mmg import get_mmg_candidates, get_mmg_exe
+    from svv.utils.solvers.solver_0d import get_solver_0d_candidates, get_solver_0d_exe
     from svv.utils.remeshing.remesh import remesh_surface
 
     _log("SMOKE: starting")
@@ -128,6 +129,13 @@ def main() -> None:
         for p in sel.candidates:
             _log(f"SMOKE: {tool}: candidate: {p}")
         _log(f"SMOKE: {tool}: selected: {get_mmg_exe(tool)}")
+
+    solver_sel = get_solver_0d_candidates()
+    _log(f"SMOKE: solver_0d: os={solver_sel.os_dir} arch={solver_sel.arch}")
+    for p in solver_sel.candidates:
+        _log(f"SMOKE: solver_0d: candidate: {p}")
+    solver_0d_exe = get_solver_0d_exe()
+    _log(f"SMOKE: solver_0d: selected: {solver_0d_exe}")
 
     # Domain build (geometry + implicit function + tetrahedral mesh)
     _log("SMOKE: domain: create/solve/build")

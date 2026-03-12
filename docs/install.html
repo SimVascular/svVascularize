@@ -182,6 +182,9 @@ pip install svv</code></pre>
       <pre data-copy><code class="language-shell">git clone https://github.com/SimVascular/svVascularize.git
 cd svVascularize
 python -m pip install -e .[dev]</code></pre>
+      <p>To locally build and stage platform-specific MMG and 0D solver binaries into the package tree, run:</p>
+      <pre data-copy><code class="language-shell">python setup.py build_ext --inplace --build-native-binaries</code></pre>
+      <p>You can also build one tool at a time with <code>--build-mmg</code> or <code>--build-solver-0d</code>.</p>
     </section>
 
     <!-- SOLVERS -->
@@ -215,15 +218,14 @@ python -m pip install -e .[dev]</code></pre>
           use <code>Simulation.write_3d_fluid_simulation()</code> to emit meshes and <code>fluid_simulation_*.xml</code> files that
           svFSI consumes directly. The ROM helpers write JSON/<code>.flow</code> data next to the geometry so you can drive
           multiscale studies from the same tree.</div>
-          <!-- 0-D install -->
+  <!-- 0-D install -->
   <h3 id="solver-0d"><code>svZeroDSolver</code></h3>
-  <p>Pre-built wheels do not yet exist for this solver;
-     however, installation can be accomplished in nearly the same way via pip and git:</p>
-
-  <pre data-copy><code class="language-bash">pip install git+https://github.com/simvascular/svZeroDSolver.git</code></pre>
-
-  <p>The solver exposes a <code>run_lv_model()</code> helper that you can
-     couple to an <code>svv</code>-generated network in &lt; 1 s.</p>
+  <p><code>svv</code> wheels now bundle a platform-specific <code>svZeroDSolver</code> executable.
+     The binary is selected automatically from <code>svv/utils/solvers/0D/&lt;OS&gt;/&lt;arch&gt;</code>.</p>
+  <p>You can override discovery with:
+     <code>SVV_SOLVER_0D_PATH</code> (full executable path),
+     <code>SVV_SOLVER_0D_DIR</code> (directory containing the executable), and
+     <code>SVV_SOLVER_0D_ARCH</code> (arch override such as <code>x86_64</code> or <code>universal2</code>).</p>
 
   <!-- 1-D install -->
   <h3 id="solver-1d"><code>svOneDSolver</code></h3>

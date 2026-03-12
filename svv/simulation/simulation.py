@@ -1,5 +1,6 @@
 import os
 import uuid
+from pathlib import Path
 from xml.dom import minidom
 from copy import deepcopy
 
@@ -62,6 +63,26 @@ class Simulation(object):
             self.fluid_1d_simulations = [[None]*len(network) for network in self.synthetic_object.networks]
             self.fluid_0d_simulations = [[None] * len(network) for network in self.synthetic_object.networks]
             self.tissue_simulations = [None]
+
+    @staticmethod
+    def _normalize_forest_mesh_layout(meshes):
+        """Return a nested [network][tree-or-network-mesh] layout."""
+        if not meshes:
+            return []
+        first = meshes[0]
+        if isinstance(first, (list, tuple)):
+            return [list(network_meshes) for network_meshes in meshes]
+        return [[mesh] for mesh in meshes]
+
+    def _resolve_output_target(self, default_folder="simulation", outdir=None, folder=None):
+        target = Path(self.file_path)
+        resolved_outdir = outdir
+        resolved_folder = folder
+        if resolved_outdir is None:
+            resolved_outdir = str(target.parent if target.name else target)
+        if resolved_folder is None:
+            resolved_folder = target.name or default_folder
+        return resolved_outdir, resolved_folder, os.path.join(resolved_outdir, resolved_folder)
 
     def build_meshes(self, fluid=True, tissue=False, hausd=0.0001, hsize=None, minratio=1.1, mindihedral=10.0,
                      order=1, remesh_vol=False, boundary_layer=True, layer_thickness_ratio=0.25,
@@ -476,25 +497,26 @@ class Simulation(object):
                 tissue_mesh.check_mesh()
                 self.tissue_domain_meshes.append(tissue_mesh)
         elif isinstance(self.synthetic_object, svv.forest.forest.Forest):
-            network_tissue_faces = []
-            network_tissue_domains = []
-            network_fluid_faces = []
-            network_fluid_domains = []
-            for i in range(len(self.fluid_domain_surface_meshes)):
-                for j in range(len(self.fluid_domain_surface_meshes[i])):
-                    surface = self.fluid_domain_surface_meshes[i][j]
-                    mesh = self.fluid_domain_volume_meshes[i][j]
+            fluid_surfaces = self._normalize_forest_mesh_layout(self.fluid_domain_surface_meshes)
+            fluid_volumes = self._normalize_forest_mesh_layout(self.fluid_domain_volume_meshes)
+            for i, network_surfaces in enumerate(fluid_surfaces):
+                network_fluid_faces = []
+                network_fluid_domains = []
+                network_volumes = fluid_volumes[i] if i < len(fluid_volumes) else []
+                for j, surface in enumerate(network_surfaces):
+                    mesh = network_volumes[j] if j < len(network_volumes) else None
                     if isinstance(surface, type(None)) or isinstance(mesh, type(None)):
                         network_fluid_faces.append(None)
                         network_fluid_domains.append(None)
                         continue
                     faces, walls, caps, lumens, shared_boundaries = extract_faces(
                         surface, mesh, crease_angle=crease_angle, verbose=verbose)
-                    # For fluid, use lumen surfaces as primary vessel walls, but include any remaining walls
                     all_walls = lumens + walls
-                    network_fluid_faces.append({'walls': all_walls, 'caps': caps, 'shared_boundaries': shared_boundaries})
+                    network_fluid_faces.append(
+                        {'walls': all_walls, 'caps': caps, 'shared_boundaries': shared_boundaries}
+                    )
                     fluid_mesh = GeneralMesh()
-                    fluid_mesh.add_mesh(mesh, name='fluid_msh_{}'.format(len(self.fluid_domain_meshes)))
+                    fluid_mesh.add_mesh(mesh, name='fluid_msh_{}_{}'.format(i, j))
                     for k, wall in enumerate(walls):
                         fluid_mesh.add_face(wall, name='wall_{}'.format(k))
                     for k, cap in enumerate(caps):
@@ -505,21 +527,32 @@ class Simulation(object):
                     network_fluid_domains.append(fluid_mesh)
                 self.fluid_domain_faces.append(network_fluid_faces)
                 self.fluid_domain_meshes.append(network_fluid_domains)
-            for i in range(len(self.tissue_domain_surface_meshes)):
-                for j in range(len(self.tissue_domain_surface_meshes[i])):
-                    surface = self.tissue_domain_surface_meshes[i][j]
-                    mesh = self.tissue_domain_volume_meshes[i][j]
+
+            tissue_surfaces = self._normalize_forest_mesh_layout(self.tissue_domain_surface_meshes)
+            tissue_volumes = self._normalize_forest_mesh_layout(self.tissue_domain_volume_meshes)
+            for i, network_surfaces in enumerate(tissue_surfaces):
+                network_tissue_faces = []
+                network_tissue_domains = []
+                network_volumes = tissue_volumes[i] if i < len(tissue_volumes) else []
+                for j, surface in enumerate(network_surfaces):
+                    mesh = network_volumes[j] if j < len(network_volumes) else None
+                    if isinstance(surface, type(None)) or isinstance(mesh, type(None)):
+                        network_tissue_faces.append(None)
+                        network_tissue_domains.append(None)
+                        continue
                     faces, walls, caps, lumens, shared_boundaries = extract_faces(
                         surface, mesh, crease_angle=crease_angle, verbose=False)
-                    network_tissue_faces.append({'walls': walls, 'caps': caps, 'shared_boundaries': shared_boundaries})
+                    network_tissue_faces.append(
+                        {'walls': walls, 'caps': caps, 'shared_boundaries': shared_boundaries}
+                    )
                     tissue_mesh = GeneralMesh()
-                    tissue_mesh.add_mesh(mesh, name='tissue_msh_{}'.format(len(self.tissue_domain_meshes)))
+                    tissue_mesh.add_mesh(mesh, name='tissue_msh_{}_{}'.format(i, j))
                     for k, wall in enumerate(walls):
-                        tissue_mesh.add_face(wall, name='lumen_{}'.format(k))
+                        tissue_mesh.add_face(wall, name='wall_{}'.format(k))
                     for k, cap in enumerate(caps):
-                        tissue_mesh.add_face(cap, name='wall_{}'.format(k))
+                        tissue_mesh.add_face(cap, name='cap_{}'.format(k))
                     for k, lumen in enumerate(lumens):
-                        tissue_mesh.add_face(lumen, name='lumen_{}'.format(i))
+                        tissue_mesh.add_face(lumen, name='lumen_{}'.format(k))
                     tissue_mesh.check_mesh()
                     network_tissue_domains.append(tissue_mesh)
                 self.tissue_domain_faces.append(network_tissue_faces)
@@ -694,18 +727,13 @@ class Simulation(object):
         else:
             raise ValueError("Index out of range.")
         if not isinstance(simulation_file, type(None)) and not isinstance(fluid_mesh, type(None)):
-            if not os.path.exists(self.file_path):
-                os.mkdir(self.file_path)
-                if not os.path.exists(self.file_path + os.sep + "mesh"):
-                    os.mkdir(self.file_path + os.sep + "mesh")
-                if not os.path.exists(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name):
-                    os.mkdir(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name)
-                if not os.path.exists(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name + os.sep + "mesh-surfaces"):
-                    os.mkdir(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name + os.sep + "mesh-surfaces")
+            mesh_dir = Path(self.file_path) / "mesh" / fluid_mesh.name
+            surface_dir = mesh_dir / "mesh-surfaces"
+            surface_dir.mkdir(parents=True, exist_ok=True)
             if isinstance(fluid_mesh.mesh, pyvista.UnstructuredGrid):
-                fluid_mesh.mesh.save(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name + os.sep + "{}.vtu".format(fluid_mesh.name))
+                fluid_mesh.mesh.save(str(mesh_dir / "{}.vtu".format(fluid_mesh.name)))
             elif isinstance(fluid_mesh.mesh, pyvista.PolyData):
-                fluid_mesh.mesh.save(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name + os.sep + "{}.vtp".format(fluid_mesh.name))
+                fluid_mesh.mesh.save(str(mesh_dir / "{}.vtp".format(fluid_mesh.name)))
             else:
                 raise ValueError("Mesh must be a pyvista mesh object.")
             for name, face in fluid_mesh.faces.items():
@@ -714,12 +742,13 @@ class Simulation(object):
                 #face.cell_data.remove("ModelFaceID")
                 #face.cell_data.remove("GlobalElementID")
                 if isinstance(face, pyvista.PolyData):
-                    face.save(self.file_path + os.sep + "mesh" + os.sep + fluid_mesh.name + os.sep + "mesh-surfaces" + os.sep + "{}.vtp".format(name))
+                    face.save(str(surface_dir / "{}.vtp".format(name)))
                 else:
                     raise ValueError("Face must be a pyvista mesh object.")
-            file_name = self.file_path + os.sep + "fluid_simulation_{}-{}.xml".format(network_id, tree_id)
+            file_name = Path(self.file_path) / "fluid_simulation_{}-{}.xml".format(network_id, tree_id)
             with open(file_name, 'w') as f:
                 f.write(simulation_file.toprettyxml())
+            return str(file_name)
         else:
             raise ValueError("Simulation file or mesh object not found.")
 
@@ -773,12 +802,82 @@ class Simulation(object):
         pass
 
     def write_0d_fluid_simulation(self, *args, **kwargs):
+        outdir = kwargs.pop("outdir", None)
+        folder = kwargs.pop("folder", None)
+        outdir, folder, target_path = self._resolve_output_target(
+            default_folder="0d_tmp", outdir=outdir, folder=folder
+        )
         if isinstance(self.synthetic_object, svv.tree.tree.Tree):
-            export_tree_0d_simulation(self.synthetic_object, kwargs)
-        elif isinstance(self.synthetic_object, svv.forest.forest.Forest) and not isinstance(self.synthetic_object.connections, type(None)):
-            for idx in range(len(self.synthetic_object.networks)):
-                # args are the network_id and the inlet selection
-                export_forest_0d_simulation(self.synthetic_object, args, kwargs)
+            export_tree_0d_simulation(
+                self.synthetic_object,
+                outdir=outdir,
+                folder=folder,
+                **kwargs,
+            )
+            return target_path
+        if isinstance(self.synthetic_object, svv.forest.forest.Forest):
+            if isinstance(self.synthetic_object.connections, type(None)):
+                raise ValueError("Forest 0D export requires a connected forest.")
+            network_id = kwargs.pop("network_id", None)
+            inlets = kwargs.pop("inlets", None)
+            if len(args) > 2:
+                raise ValueError("Forest 0D export accepts at most network_id and inlets.")
+            if len(args) >= 1:
+                network_id = args[0]
+            if len(args) == 2:
+                inlets = args[1]
+            if network_id is None or inlets is None:
+                raise ValueError("Forest 0D export requires network_id and inlets.")
+            export_forest_0d_simulation(
+                self.synthetic_object,
+                network_id,
+                inlets,
+                outdir=outdir,
+                folder=folder,
+                **kwargs,
+            )
+            return target_path
+        raise ValueError("Unsupported synthetic object type.")
+
+    def export_0d_fluid_simulation(self, *args, **kwargs):
+        return self.write_0d_fluid_simulation(*args, **kwargs)
+
+    def export_3d_fluid_simulation(self, **mesh_kwargs):
+        mesh_kwargs.pop("fluid", None)
+        mesh_kwargs.pop("tissue", None)
+        self.build_meshes(fluid=True, tissue=False, **mesh_kwargs)
+        self.extract_faces()
+        written_files = []
+        if isinstance(self.synthetic_object, svv.tree.tree.Tree):
+            self.construct_3d_fluid_simulation()
+            written_files.append(self.write_3d_fluid_simulation())
+            return tuple(written_files)
+        if isinstance(self.synthetic_object, svv.forest.forest.Forest):
+            if isinstance(self.synthetic_object.connections, type(None)):
+                for network_id, network in enumerate(self.synthetic_object.networks):
+                    for tree_id, _ in enumerate(network):
+                        if network_id >= len(self.fluid_domain_meshes):
+                            continue
+                        if tree_id >= len(self.fluid_domain_meshes[network_id]):
+                            continue
+                        if isinstance(self.fluid_domain_meshes[network_id][tree_id], type(None)):
+                            continue
+                        self.construct_3d_fluid_simulation(network_id, tree_id)
+                        written_files.append(self.write_3d_fluid_simulation(network_id, tree_id))
+            else:
+                for network_id, _ in enumerate(self.synthetic_object.networks):
+                    if network_id >= len(self.fluid_domain_meshes):
+                        continue
+                    if not self.fluid_domain_meshes[network_id]:
+                        continue
+                    if isinstance(self.fluid_domain_meshes[network_id][0], type(None)):
+                        continue
+                    self.construct_3d_fluid_simulation(network_id)
+                    written_files.append(self.write_3d_fluid_simulation(network_id))
+            if not written_files:
+                raise ValueError("No 3D fluid simulations were generated.")
+            return tuple(written_files)
+        raise ValueError("Unsupported synthetic object type.")
 
     def construct_3d_tissue_perfusion_equation(self, *args):
         pass

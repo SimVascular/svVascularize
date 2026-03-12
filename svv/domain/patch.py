@@ -1,7 +1,6 @@
 import numpy as np
 from .kernel.kernel import Kernel
-from .solver.solver import Solver
-from time import perf_counter_ns
+from .solver.solver import Solver, constants_from_cartesian
 
 
 class Patch:
@@ -61,12 +60,16 @@ class Patch:
         --------
         None
         """
-        self.solver = Solver(self.kernel)
+        if self.normals is not None:
+            normals = np.asarray(self.normals, dtype=np.float64)
+            normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+            self.solver = None
+            self.constants = np.round(constants_from_cartesian(self.kernel, normals), decimals=precision)
+            return None
+        if self.solver is None or self.solver.kernel is not self.kernel:
+            self.solver = Solver(self.kernel)
         self.solver.set_solver(method=method)
-        if isinstance(self.normals, type(None)):
-            self.solver.solve()
-        else:
-            self.solver.solve(skip=True)
+        self.solver.solve()
         self.constants = np.round(self.solver.get_constants(), decimals=precision)
         return None
 
