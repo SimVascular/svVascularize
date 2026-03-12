@@ -412,13 +412,10 @@ class Forest(object):
 
         Returns
         -------
-        centerlines : pyvista.PolyData
-            Merged centerline polydata for all trees.
-        polys : list[pyvista.PolyData]
-            Per-branch polylines across all trees.
-        boundary_points : list[dict]
-            Each dict has keys ``type`` ('inlet'/'outlet'), ``point``
-            (3-element array), ``radius`` (float), and ``tree_label`` (str).
+        result : CenterlineResult
+            A 2-tuple ``(centerlines, polys)`` for backward compatibility.
+            Access ``result.boundary_points`` for inlet/outlet metadata
+            (each dict also includes a ``tree_label`` key).
         """
         import pyvista
 
@@ -435,9 +432,11 @@ class Forest(object):
                 if data_arr.ndim != 2 or data_arr.shape[0] == 0:
                     continue
 
-                cl, polys, bp = tree.export_centerlines(
+                result = tree.export_centerlines(
                     points_per_unit_length=points_per_unit_length, **kwargs
                 )
+                cl, polys = result
+                bp = getattr(result, 'boundary_points', [])
                 all_polys.extend(polys)
 
                 label = f"network{net_idx}_tree{tree_idx}"
@@ -453,7 +452,8 @@ class Forest(object):
         if all_centerlines is None:
             raise ValueError("Forest contains no trees with data to export.")
 
-        return all_centerlines, all_polys, all_boundary_points
+        from svv.tree.tree import CenterlineResult
+        return CenterlineResult(all_centerlines, all_polys, all_boundary_points)
 
     def save(self, path: str, include_timing: bool = False):
         """

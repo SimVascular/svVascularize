@@ -1327,11 +1327,8 @@ class VascularizeGUI(QMainWindow):
 
             if hasattr(obj, "export_centerlines"):
                 result = obj.export_centerlines(points_per_unit_length=points_per_unit_length)
-                # Unpack: (centerlines, polys, boundary_points) or legacy (centerlines, polys)
-                if len(result) >= 3:
-                    centerlines, _, boundary_points = result[0], result[1], result[2]
-                else:
-                    centerlines = result[0]
+                centerlines = result[0]
+                boundary_points = getattr(result, 'boundary_points', [])
             else:
                 raise ValueError("Selected object does not support centerline export.")
             if isinstance(centerlines, pv.PolyData):

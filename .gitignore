@@ -28,6 +28,18 @@ svZeroDSolver*
 # Sample artifacts
 cube.dmn
 
+# Reports and LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+optimization_report.*
+macos_gui_report.*
+
+# Data files (too large for repo)
+biventricular.txt
+biventricular_inlet_outlet.txt
+
 # Local GUI docs and scripts (ignored)
 CAD_GUI_DOCUMENTATION.md
 CAD_GUI_SUMMARY.md
