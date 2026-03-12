@@ -1219,28 +1219,30 @@ class VascularizeGUI(QMainWindow):
         menu = QMenu(self)
 
         act_centerlines = menu.addAction("Export Centerlines...")
-        act_centerlines.triggered.connect(self.export_centerlines_dialog)
-
         act_solids = menu.addAction("Export Solids...")
-        act_solids.triggered.connect(self.export_solids_dialog)
-
         act_splines = menu.addAction("Export Splines...")
-        act_splines.triggered.connect(self.export_splines_dialog)
-
         menu.addSeparator()
-
         act_0d = menu.addAction("Export 0D Simulation...")
-        act_0d.triggered.connect(self.export_0d_simulation_dialog)
-
         act_3d = menu.addAction("Export 3D Simulation...")
-        act_3d.triggered.connect(self.export_3d_simulation_dialog)
 
         # Show the menu below the Export toolbar button.
         btn = self.file_toolbar.widgetForAction(self.action_export)
         if btn is not None:
-            menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+            pos = btn.mapToGlobal(btn.rect().bottomLeft())
         else:
-            menu.exec(self.cursor().pos())
+            pos = self.cursor().pos()
+
+        selected = menu.exec(pos)
+        if selected is act_centerlines:
+            self.export_centerlines_dialog()
+        elif selected is act_solids:
+            self.export_solids_dialog()
+        elif selected is act_splines:
+            self.export_splines_dialog()
+        elif selected is act_0d:
+            self.export_0d_simulation_dialog()
+        elif selected is act_3d:
+            self.export_3d_simulation_dialog()
 
     def _require_synthetic_object(self):
         """
