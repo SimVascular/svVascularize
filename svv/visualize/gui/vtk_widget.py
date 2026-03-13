@@ -1140,7 +1140,7 @@ class VTKWidget(QWidget):
 
     def add_tree(self, tree, color='red', label=None, group_id=None):
         """
-        Add a Tree visualization.
+        Add a Tree visualization using batch cylinder rendering.
 
         Parameters
         ----------
@@ -1159,32 +1159,15 @@ class VTKWidget(QWidget):
         if not self.plotter:
             return []
 
-        actors = []
-        base = label or f"tree_{len(self.tree_actors)}"
-        for i in range(tree.data.shape[0]):
-            center = (tree.data[i, 0:3] + tree.data[i, 3:6]) / 2
-            direction = tree.data.get('w_basis', i)
-            radius = tree.data.get('radius', i)
-            length = tree.data.get('length', i)
+        from svv.visualize.batch_cylinders import tree_to_merged_mesh
 
-            vessel = self._pv.Cylinder(
-                center=center,
-                direction=direction,
-                radius=radius,
-                height=length
-            )
-            actor = self.plotter.add_mesh(
-                vessel,
-                color=color,
-                name=f'{base}_vessel_{i}'
-            )
-            actors.append(actor)
-            # Periodically process Qt events to keep the GUI responsive
-            if i % 100 == 0:
-                try:
-                    QApplication.processEvents()
-                except Exception:
-                    pass
+        base = label or f"tree_{len(self.tree_actors)}"
+        merged = tree_to_merged_mesh(tree)
+        if merged is None:
+            return []
+
+        actor = self.plotter.add_mesh(merged, color=color, name=base)
+        actors = [actor]
 
         self.tree_actors.extend(actors)
         if group_id is not None:
@@ -1195,7 +1178,7 @@ class VTKWidget(QWidget):
 
     def add_connection_vessels(self, vessels, color='red', label=None, group_id=None):
         """
-        Add connecting vessels (array of segments with radius).
+        Add connecting vessels using batch cylinder rendering.
 
         Parameters
         ----------
@@ -1208,26 +1191,17 @@ class VTKWidget(QWidget):
             return []
         if not self.plotter:
             return []
-        actors = []
+
+        from svv.visualize.batch_cylinders import segments_to_merged_mesh
+
         base = label or f"connection_{len(self.connection_actors)}"
-        for idx, seg in enumerate(vessels):
-            p0 = seg[0:3]
-            p1 = seg[3:6]
-            radius = seg[6]
-            direction = p1 - p0
-            length = np.linalg.norm(direction)
-            if length <= 0:
-                continue
-            direction = direction / length
-            center = (p0 + p1) / 2
-            cyl = self._pv.Cylinder(center=center, direction=direction, radius=radius, height=length)
-            actor = self.plotter.add_mesh(cyl, color=color, name=f"{base}_seg_{idx}")
-            actors.append(actor)
-            if idx % 200 == 0:
-                try:
-                    QApplication.processEvents()
-                except Exception:
-                    pass
+        merged = segments_to_merged_mesh(vessels)
+        if merged is None:
+            return []
+
+        actor = self.plotter.add_mesh(merged, color=color, name=base)
+        actors = [actor]
+
         self.connection_actors.extend(actors)
         if group_id is not None:
             self.connection_actor_groups[group_id] = actors
