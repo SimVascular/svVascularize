@@ -1294,7 +1294,7 @@ class VascularizeGUI(QMainWindow):
         points_spin.setToolTip("Sampling density along centerlines in points per unit length.")
         form.addRow("Points per unit length:", points_spin)
 
-        boundary_cb = QCheckBox("Export boundary points (inlets/outlets)")
+        boundary_cb = QCheckBox("X-CAVATE Export boundary points (inlet/outlet)")
         boundary_cb.setChecked(True)
         boundary_cb.setToolTip(
             "Write a companion file with labeled inlet and outlet coordinates.\n"
@@ -1911,7 +1911,7 @@ class VascularizeGUI(QMainWindow):
         seperate_cb.setToolTip("If checked, write an extra label column for proximal vs distal points.")
         form.addRow("", seperate_cb)
 
-        boundary_cb = QCheckBox("Export boundary points (inlets/outlets)")
+        boundary_cb = QCheckBox("X-CAVATE Export boundary points (inlet/outlet)")
         boundary_cb.setChecked(True)
         boundary_cb.setToolTip(
             "Write a companion file listing inlet and outlet coordinates.\n"
