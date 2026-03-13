@@ -3977,6 +3977,9 @@ class SolutionInspectorWidget(QWidget):
         title_bar.setSpacing(6)
 
         menu_bar = QMenuBar(self)
+        # Keep this dock-local menu bar out of the native macOS menu bar.
+        menu_bar.setNativeMenuBar(False)
+        self.embedded_menu_bar = menu_bar
 
         # File menu
         file_menu = menu_bar.addMenu("File")

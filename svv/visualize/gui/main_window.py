@@ -5,11 +5,17 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
+
+if sys.platform == "darwin":
+    os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDockWidget, QStatusBar,
     QFileDialog, QMessageBox, QTreeWidget, QTreeWidgetItem, QTabWidget, QToolBar,
     QPlainTextEdit, QProgressBar, QProgressDialog, QFrame, QDialog, QFormLayout,
     QDialogButtonBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit, QComboBox,
+    QApplication,
     QColorDialog, QMenu
 )
 from PySide6.QtCore import Qt, QSize, QSettings, QTimer, QUrl
@@ -25,6 +31,7 @@ from svv.visualize.gui.theme import CADTheme, CADIcons
 import svv.tree.tree as _svv_tree_mod
 import svv.forest.forest as _svv_forest_mod
 from svv.telemetry import capture_exception, capture_message
+from svv.visualize.spline_export import export_spline_files
 
 
 class SystemMonitorWidget(QFrame):
@@ -231,7 +238,7 @@ class ObjectBrowserWidget(QTreeWidget):
             if actor is None or plotter is None:
                 return
             actor.SetVisibility(bool(checked))
-            plotter.render()
+            vtk_widget.request_render()
             return
 
         # Network / tree visibility toggles
@@ -419,6 +426,7 @@ class VascularizeGUI(QMainWindow):
 
         # Apply CAD theme
         self.setStyleSheet(CADTheme.get_stylesheet())
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         self.setWindowTitle("svVascularize - Vascular Design")
         self.setGeometry(100, 100, 1600, 1000)
@@ -1887,11 +1895,6 @@ class VascularizeGUI(QMainWindow):
         if obj is None:
             return
 
-        from svv.tree.tree import Tree as _TreeType
-        from svv.forest.forest import Forest as _ForestType
-        is_tree = isinstance(obj, _TreeType)
-        is_forest = isinstance(obj, _ForestType)
-
         # Options dialog
         dlg = QDialog(self)
         dlg.setWindowTitle("Export Splines Options")
@@ -1943,169 +1946,23 @@ class VascularizeGUI(QMainWindow):
             return
 
         try:
-            from pathlib import Path as _Path
-
-            import numpy as np
-            from scipy.interpolate import splev
-            from svv.tree.export.write_splines import get_interpolated_sv_data
-
-            out_path = _Path(file_path)
-            if not out_path.suffix:
-                out_path = out_path.with_suffix(".txt")
-
-            def _write_tree_splines(tree: _TreeType, dst: _Path) -> None:
-                if getattr(tree, "data", None) is None:
-                    raise ValueError("Tree has no data to export.")
-                *_, interp_xyzr = get_interpolated_sv_data(tree.data)
-                if not interp_xyzr:
-                    raise ValueError("Tree has no spline branches to export.")
-                t = np.linspace(0, 1, num=spline_sample_points)
-                with dst.open("w", encoding="utf-8") as spline_file:
-                    for vessel in range(len(interp_xyzr)):
-                        spline_file.write(f"Vessel: {vessel}, Number of Points: {spline_sample_points}\n\n")
-                        data = splev(t, interp_xyzr[vessel][0])
-                        for k in range(spline_sample_points):
-                            if seperate:
-                                label = 1 if k > spline_sample_points // 2 else 0
-                                spline_file.write(
-                                    f"{data[0][k]}, {data[1][k]}, {data[2][k]}, {data[3][k]}, {label}\n"
-                                )
-                            else:
-                                spline_file.write(
-                                    f"{data[0][k]}, {data[1][k]}, {data[2][k]}, {data[3][k]}\n"
-                                )
-                        spline_file.write("\n")
-
-            def _get_start_point(tree: _TreeType):
-                """Return the root segment's proximal point (col 0:3)."""
-                data = np.asarray(tree.data)
-                if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] < 6:
-                    return None
-                root_idx = np.where(np.isnan(data[:, 17]))[0]
-                if len(root_idx) == 0:
-                    return None
-                return data[root_idx[0], 0:3].copy()
-
-            def _pair_forest_boundary(forest):
-                """Pair tree start points as inlet/outlet per network.
-
-                Within each network trees are paired: (tree0→inlet,
-                tree1→outlet), (tree2→inlet, tree3→outlet), etc.
-                An unpaired last tree is placed as inlet.
-                """
-                inlets, outlets = [], []
-                for network in (getattr(forest, "networks", []) or []):
-                    for i in range(0, len(network), 2):
-                        pt = _get_start_point(network[i])
-                        if pt is not None:
-                            inlets.append(pt)
-                        if i + 1 < len(network):
-                            pt = _get_start_point(network[i + 1])
-                            if pt is not None:
-                                outlets.append(pt)
-                return inlets, outlets
-
-            def _write_boundary_file(inlets, outlets, dst: _Path):
-                with dst.open("w", encoding="utf-8") as f:
-                    f.write("inlet\n")
-                    for p in inlets:
-                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
-                    f.write("outlet\n")
-                    for p in outlets:
-                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
-
-            if is_tree:
-                _write_tree_splines(obj, out_path)
-                if export_boundary:
-                    bp_path = out_path.with_name(out_path.stem + "_inlet_outlet.txt")
-                    pt = _get_start_point(obj)
-                    _write_boundary_file([pt] if pt is not None else [], [], bp_path)
-                    self.update_status(f"Tree splines exported to {out_path}  |  boundary points → {bp_path.name}")
-                else:
-                    self.update_status(f"Tree splines exported to {out_path}")
+            written = export_spline_files(
+                obj,
+                file_path,
+                spline_sample_points=spline_sample_points,
+                separate=seperate,
+            )
+            if len(written) == 1:
+                self.update_status(f"Splines exported to {written[0]}")
                 return
 
-            if is_forest and getattr(obj, "connections", None) is not None:
-                from svv.forest.export.export_spline import write_splines, export_spline
-
-                # export_spline operates on TreeConnection objects from Forest.connections.tree_connections
-                # It returns: (interp_xyz, interp_radii, interp_normals, all_points, all_radii, all_normals)
-                all_points = []
-                all_radii = []
-                for tc in obj.connections.tree_connections:
-                    _, _, _, net_points, net_radii, _ = export_spline(tc)
-                    all_points.extend(net_points)
-                    all_radii.extend(net_radii)
-
-                # Temporarily change working directory to target location for write_splines
-                cwd = os.getcwd()
-                target_dir = str(out_path.parent) if str(out_path.parent) else cwd
-                try:
-                    os.chdir(target_dir)
-                    # write_splines writes 'network_{i}_b_splines.txt' in cwd; we adapt
-                    write_splines(
-                        all_points,
-                        all_radii,
-                        spline_sample_points=spline_sample_points,
-                        seperate=seperate,
-                        write_splines=True,
-                    )
-                    default_path = os.path.join(target_dir, "network_0_b_splines.txt")
-                    if os.path.exists(default_path):
-                        os.replace(default_path, str(out_path))
-                finally:
-                    os.chdir(cwd)
-
-                if export_boundary:
-                    inlets, outlets = _pair_forest_boundary(obj)
-                    bp_path = out_path.with_name(out_path.stem + "_inlet_outlet.txt")
-                    _write_boundary_file(inlets, outlets, bp_path)
-                    self.update_status(f"Connected forest splines exported to {out_path}  |  boundary points → {bp_path.name}")
-                else:
-                    self.update_status(f"Connected forest splines exported to {out_path}")
-                return
-
-            if is_forest:
-                # Forest without connections: export each Tree independently using the tree spline format.
-                trees = []
-                for net_idx, network in enumerate(getattr(obj, "networks", []) or []):
-                    for tree_idx, tree in enumerate(network):
-                        trees.append((net_idx, tree_idx, tree))
-                if not trees:
-                    raise ValueError("Forest contains no trees to export.")
-
-                if len(trees) == 1:
-                    _, _, tree = trees[0]
-                    _write_tree_splines(tree, out_path)
-                    if export_boundary:
-                        bp_path = out_path.with_name(out_path.stem + "_inlet_outlet.txt")
-                        pt = _get_start_point(tree)
-                        _write_boundary_file([pt] if pt is not None else [], [], bp_path)
-                    self.update_status(f"Tree splines exported to {out_path}")
-                    return
-
-                stem = out_path.stem or "splines"
-                suffix = out_path.suffix or ".txt"
-                written = []
-                for net_idx, tree_idx, tree in trees:
-                    dst = out_path.with_name(f"{stem}_network{net_idx}_tree{tree_idx}{suffix}")
-                    _write_tree_splines(tree, dst)
-                    written.append(dst)
-
-                if export_boundary:
-                    inlets, outlets = _pair_forest_boundary(obj)
-                    bp_path = out_path.with_name(f"{stem}_inlet_outlet.txt")
-                    _write_boundary_file(inlets, outlets, bp_path)
-
+            if hasattr(written[0], "parent"):
                 QMessageBox.information(
                     self,
                     "Splines Exported",
-                    f"Exported {len(written)} tree spline file(s) to:\n{out_path.parent}"
+                    f"Exported {len(written)} spline file(s) to:\n{written[0].parent}"
                 )
-                self.update_status(f"Exported {len(written)} tree spline file(s)")
-                return
-
-            raise ValueError("Unsupported object type for spline export.")
+                self.update_status(f"Exported {len(written)} spline file(s)")
         except Exception as e:
             self._record_telemetry(e, action="export_splines")
             QMessageBox.critical(
@@ -2392,6 +2249,8 @@ class VascularizeGUI(QMainWindow):
 
         # Shut down background executors
         try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
             self._executor.shutdown(wait=False)
         except Exception:
             pass
@@ -2441,20 +2300,41 @@ class VascularizeGUI(QMainWindow):
         # Accept the close event
         event.accept()
 
+        # On macOS, relying on the default last-window-closed behavior can
+        # leave the application resident in the Dock longer than expected.
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
+
     # ---- Background domain loading ----
     def _load_domain_file(self, file_path: str, cancel_event: threading.Event, progress_queue: Optional[Queue] = None,
                           build_resolution: Optional[int] = None):
-        def report_progress(value, label=None):
-            """Report progress value and optionally update the label text."""
+        def report_progress(value=None, label=None, indeterminate=None):
+            """Report progress value and optionally update the dialog state."""
             if progress_queue is not None:
                 try:
-                    # Send tuple of (value, label) if label provided, else just value
+                    payload = {}
+                    if value is not None:
+                        payload["value"] = int(value)
                     if label is not None:
-                        progress_queue.put((value, label))
-                    else:
-                        progress_queue.put(value)
+                        payload["label"] = label
+                    if indeterminate is not None:
+                        payload["indeterminate"] = bool(indeterminate)
+                    progress_queue.put(payload if payload else value)
                 except Exception:
                     pass
+
+        def make_stage_reporter(start, end):
+            span = end - start
+
+            def _stage_report(progress=None, label=None, indeterminate=None):
+                value = None
+                if progress is not None:
+                    clamped = max(0.0, min(1.0, float(progress)))
+                    value = round(start + span * clamped)
+                report_progress(value, label, indeterminate)
+
+            return _stage_report
 
         try:
             from svv.domain.domain import Domain
@@ -2485,10 +2365,11 @@ class VascularizeGUI(QMainWindow):
                     # Step 2: Build (tetrahedralize and extract boundary)
                     report_progress(35, "Building domain (tetrahedralization + boundary extraction)...")
                     try:
+                        build_progress = make_stage_reporter(35, 90)
                         if build_resolution is not None:
-                            domain.build(resolution=build_resolution)
+                            domain.build(resolution=build_resolution, progress_callback=build_progress)
                         else:
-                            domain.build()
+                            domain.build(progress_callback=build_progress)
                         report_progress(90, "Domain built successfully")
                     except Exception as exc:
                         # If build fails (e.g., TetGen errors) continue with loaded
@@ -2521,14 +2402,14 @@ class VascularizeGUI(QMainWindow):
                 # Step 2: Create domain
                 report_progress(10, "Creating domain (initializing implicit function)...")
                 domain = Domain(mesh)
-                domain.create()
+                domain.create(progress_callback=make_stage_reporter(10, 30))
                 if cancel_event.is_set():
                     return None
                 report_progress(30, "Domain created")
 
                 # Step 3: Solve (compute fast evaluation structures)
                 report_progress(35, "Solving domain (computing evaluation structures)...")
-                domain.solve()
+                domain.solve(progress_callback=make_stage_reporter(35, 60))
                 if cancel_event.is_set():
                     return None
                 report_progress(60, "Domain solved")
@@ -2538,10 +2419,11 @@ class VascularizeGUI(QMainWindow):
                 build_failed = False
                 build_error_msg = None
                 try:
+                    build_progress = make_stage_reporter(65, 90)
                     if build_resolution is not None:
-                        domain.build(resolution=build_resolution)
+                        domain.build(resolution=build_resolution, progress_callback=build_progress)
                     else:
-                        domain.build()
+                        domain.build(progress_callback=build_progress)
                     report_progress(90, "Domain built successfully")
                 except Exception as exc:
                     build_failed = True
@@ -2565,7 +2447,7 @@ class VascularizeGUI(QMainWindow):
 
             if domain.boundary is None and hasattr(domain, 'patches') and len(domain.patches) > 0:
                 report_progress(92, "Building boundary from patches...")
-                domain.build()
+                domain.build(progress_callback=make_stage_reporter(92, 98))
                 report_progress(98, "Boundary built")
 
             domain.filename = file_path
@@ -2658,13 +2540,31 @@ class VascularizeGUI(QMainWindow):
                 except Exception:
                     break
                 try:
+                    if isinstance(item, dict):
+                        indeterminate = item.get("indeterminate")
+                        if indeterminate is True:
+                            self._load_progress.setRange(0, 0)
+                        elif indeterminate is False and self._load_progress.maximum() == 0:
+                            self._load_progress.setRange(0, 100)
+                        label = item.get("label")
+                        if label:
+                            self._load_progress.setLabelText(label)
+                        if "value" in item:
+                            if self._load_progress.maximum() == 0 and indeterminate is not True:
+                                self._load_progress.setRange(0, 100)
+                            if self._load_progress.maximum() != 0:
+                                self._load_progress.setValue(int(item["value"]))
                     # Handle both plain values and (value, label) tuples
-                    if isinstance(item, tuple):
+                    elif isinstance(item, tuple):
                         value, label = item
+                        if self._load_progress.maximum() == 0:
+                            self._load_progress.setRange(0, 100)
                         self._load_progress.setValue(int(value))
                         if label:
                             self._load_progress.setLabelText(label)
                     else:
+                        if self._load_progress.maximum() == 0:
+                            self._load_progress.setRange(0, 100)
                         self._load_progress.setValue(int(item))
                 except Exception:
                     pass

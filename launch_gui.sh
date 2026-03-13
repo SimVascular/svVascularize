@@ -1,8 +1,14 @@
 #!/bin/bash
-# Launcher script for svVascularize GUI with software rendering
+# Launcher script for svVascularize GUI.
 
 # Add svVascularize to Python path
 export PYTHONPATH="$(pwd):$PYTHONPATH"
+
+PLATFORM="$(uname -s)"
+IS_LINUX=0
+if [ "$PLATFORM" = "Linux" ]; then
+    IS_LINUX=1
+fi
 
 # Function to find Mesa drivers
 find_mesa_drivers() {
@@ -61,75 +67,84 @@ for arg in "$@"; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --system-gl    Use system OpenGL instead of software rendering"
+            echo "  --system-gl    On Linux, use system OpenGL instead of software rendering"
             echo "  --debug-gl     Enable OpenGL debugging output"
             echo "  --help         Show this help message"
             echo ""
             echo "Environment variables:"
-            echo "  SVV_GUI_GL_MODE='system'         Use system OpenGL (same as --system-gl)"
-            echo "  SVV_GUI_SOFTWARE_DRIVER='swr'    Use OpenSWR instead of llvmpipe"
-            echo "  SVV_LIBGL_DRIVERS_PATH='/path'   Override DRI drivers path"
+            echo "  SVV_GUI_GL_MODE='system'         On Linux, use system OpenGL (same as --system-gl)"
+            echo "  SVV_GUI_SOFTWARE_DRIVER='swr'    On Linux, use OpenSWR instead of llvmpipe"
+            echo "  SVV_LIBGL_DRIVERS_PATH='/path'   On Linux, override DRI drivers path"
             exit 0
             ;;
     esac
 done
 
 # Configure OpenGL settings
-if [ "$USE_SYSTEM_GL" -eq 1 ]; then
-    export SVV_GUI_GL_MODE=system
-    echo "Using system OpenGL drivers"
-else
-    # Configure software rendering
-    export LIBGL_ALWAYS_SOFTWARE=1
-    export GALLIUM_DRIVER=llvmpipe
-    export MESA_GL_VERSION_OVERRIDE=3.3
-    export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-    export QT_OPENGL=software
-    export SVV_GUI_GL_MODE=software
+if [ "$IS_LINUX" -eq 1 ]; then
+    if [ "$USE_SYSTEM_GL" -eq 1 ]; then
+        export SVV_GUI_GL_MODE=system
+        echo "Using system OpenGL drivers"
+    else
+        # Configure software rendering
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GALLIUM_DRIVER=llvmpipe
+        export MESA_GL_VERSION_OVERRIDE=3.3
+        export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+        export QT_OPENGL=software
+        export SVV_GUI_GL_MODE=software
 
-    # Find and set Mesa drivers path
-    if [ -z "$SVV_LIBGL_DRIVERS_PATH" ]; then
-        DRI_PATH=$(find_mesa_drivers)
-        if [ $? -eq 0 ]; then
-            export LIBGL_DRIVERS_PATH="$DRI_PATH"
-            export SVV_LIBGL_DRIVERS_PATH="$DRI_PATH"
-            echo "Found Mesa drivers at: $DRI_PATH"
-        else
-            echo "Warning: Could not find Mesa DRI drivers. Trying system fallback..."
-            # Try installing mesa packages if needed
-            if command -v conda &> /dev/null && [ -n "$CONDA_PREFIX" ]; then
-                echo "Attempting to install Mesa drivers via conda..."
-                conda install -y -c conda-forge mesa-libgl-cos7-x86_64 mesa-dri-drivers-cos7-x86_64 2>/dev/null || true
+        # Find and set Mesa drivers path
+        if [ -z "$SVV_LIBGL_DRIVERS_PATH" ]; then
+            DRI_PATH=$(find_mesa_drivers)
+            if [ $? -eq 0 ]; then
+                export LIBGL_DRIVERS_PATH="$DRI_PATH"
+                export SVV_LIBGL_DRIVERS_PATH="$DRI_PATH"
+                echo "Found Mesa drivers at: $DRI_PATH"
+            else
+                echo "Warning: Could not find Mesa DRI drivers. Trying system fallback..."
+                # Try installing mesa packages if needed
+                if command -v conda &> /dev/null && [ -n "$CONDA_PREFIX" ]; then
+                    echo "Attempting to install Mesa drivers via conda..."
+                    conda install -y -c conda-forge mesa-libgl-cos7-x86_64 mesa-dri-drivers-cos7-x86_64 2>/dev/null || true
 
-                # Try to find again after installation
-                DRI_PATH=$(find_mesa_drivers)
-                if [ $? -eq 0 ]; then
-                    export LIBGL_DRIVERS_PATH="$DRI_PATH"
-                    export SVV_LIBGL_DRIVERS_PATH="$DRI_PATH"
-                    echo "Mesa drivers installed and found at: $DRI_PATH"
+                    # Try to find again after installation
+                    DRI_PATH=$(find_mesa_drivers)
+                    if [ $? -eq 0 ]; then
+                        export LIBGL_DRIVERS_PATH="$DRI_PATH"
+                        export SVV_LIBGL_DRIVERS_PATH="$DRI_PATH"
+                        echo "Mesa drivers installed and found at: $DRI_PATH"
+                    fi
                 fi
             fi
+        else
+            export LIBGL_DRIVERS_PATH="$SVV_LIBGL_DRIVERS_PATH"
+            echo "Using user-specified Mesa drivers at: $SVV_LIBGL_DRIVERS_PATH"
         fi
-    else
-        export LIBGL_DRIVERS_PATH="$SVV_LIBGL_DRIVERS_PATH"
-        echo "Using user-specified Mesa drivers at: $SVV_LIBGL_DRIVERS_PATH"
-    fi
 
-    # Force XCB on Wayland systems
-    if [ -n "$WAYLAND_DISPLAY" ]; then
-        export QT_QPA_PLATFORM=xcb
+        # Force XCB on Wayland systems
+        if [ -n "$WAYLAND_DISPLAY" ]; then
+            export QT_QPA_PLATFORM=xcb
+        fi
     fi
+else
+    if [ "$USE_SYSTEM_GL" -eq 1 ]; then
+        echo "--system-gl is only relevant on Linux; using native platform rendering on $PLATFORM."
+    fi
+    echo "Using native platform rendering on $PLATFORM."
 fi
 
 # Enable debugging if requested
 if [ "$DEBUG_GL" -eq 1 ]; then
     export SVV_GUI_DEBUG_GL=1
-    export MESA_DEBUG=1
-    export LIBGL_DEBUG=verbose
+    if [ "$IS_LINUX" -eq 1 ]; then
+        export MESA_DEBUG=1
+        export LIBGL_DEBUG=verbose
+    fi
 fi
 
 # Fix libffi conflicts for Mesa drivers
-if [ -n "$CONDA_PREFIX" ]; then
+if [ "$IS_LINUX" -eq 1 ] && [ -n "$CONDA_PREFIX" ]; then
     # Look for libffi in conda environment
     if [ -f "$CONDA_PREFIX/lib/libffi.so.7" ]; then
         export LD_PRELOAD="$CONDA_PREFIX/lib/libffi.so.7:$LD_PRELOAD"

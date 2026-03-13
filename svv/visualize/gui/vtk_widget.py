@@ -243,6 +243,7 @@ class _OffscreenBlitWidget(QWidget):
 
         self._display = QLabel(self)
         self._display.setAlignment(Qt.AlignCenter)
+        self._display.setScaledContents(True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -251,6 +252,9 @@ class _OffscreenBlitWidget(QWidget):
         self.setMouseTracking(True)
         self._display.setMouseTracking(True)
         self._press_pos = None
+        self._blit_in_progress = False
+        self._idle_blit_delay_ms = 16
+        self._interactive_blit_delay_ms = 33
 
         self._vtk_iren = None
         try:
@@ -268,38 +272,45 @@ class _OffscreenBlitWidget(QWidget):
         self._blit_timer.setSingleShot(True)
         self._blit_timer.timeout.connect(self.blit)
 
-        try:
-            import vtk as _vtk
-
-            plotter.ren_win.AddObserver(
-                _vtk.vtkCommand.RenderEvent,
-                lambda _obj, _ev: self.schedule_blit(),
-            )
-        except Exception:
-            pass
-
     def blit(self):
         """Capture the offscreen framebuffer and display it in the label."""
+        if self._blit_in_progress:
+            return
+        self._blit_in_progress = True
         try:
             img = self._plotter.screenshot(return_img=True)
             if img is None:
                 return
+            img = np.ascontiguousarray(img)
             h, w, ch = img.shape
+            if ch == 4:
+                fmt = self._QImage.Format.Format_RGBA8888
+            else:
+                fmt = self._QImage.Format.Format_RGB888
             qimg = self._QImage(
                 img.tobytes(),
                 w,
                 h,
                 w * ch,
-                self._QImage.Format.Format_RGB888,
+                fmt,
             )
             self._display.setPixmap(self._QPixmap.fromImage(qimg))
         except Exception:
             pass
+        finally:
+            self._blit_in_progress = False
 
     def schedule_blit(self, delay_ms=16):
         """Request a debounced framebuffer copy."""
-        if not self._blit_timer.isActive():
-            self._blit_timer.start(delay_ms)
+        delay_ms = max(0, int(delay_ms))
+        if self._blit_in_progress:
+            return
+        if self._blit_timer.isActive():
+            remaining = self._blit_timer.remainingTime()
+            if remaining >= 0 and remaining <= delay_ms:
+                return
+            self._blit_timer.stop()
+        self._blit_timer.start(delay_ms)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -373,7 +384,7 @@ class _OffscreenBlitWidget(QWidget):
             self._vtk_iren.RightButtonPressEvent()
         elif button == Qt.MouseButton.MiddleButton:
             self._vtk_iren.MiddleButtonPressEvent()
-        self.schedule_blit()
+        self.schedule_blit(self._interactive_blit_delay_ms)
 
     def mouseReleaseEvent(self, event):
         release_pos = self._get_pos(event)
@@ -404,7 +415,7 @@ class _OffscreenBlitWidget(QWidget):
                         pass
 
         self._press_pos = None
-        self.schedule_blit()
+        self.schedule_blit(0)
 
     def mouseMoveEvent(self, event):
         if self._vtk_iren is None:
@@ -412,7 +423,7 @@ class _OffscreenBlitWidget(QWidget):
         self._forward_pos(event)
         self._vtk_iren.MouseMoveEvent()
         if event.buttons():
-            self.schedule_blit()
+            self.schedule_blit(self._interactive_blit_delay_ms)
 
     def wheelEvent(self, event):
         if self._vtk_iren is None:
@@ -422,7 +433,7 @@ class _OffscreenBlitWidget(QWidget):
             self._vtk_iren.MouseWheelForwardEvent()
         else:
             self._vtk_iren.MouseWheelBackwardEvent()
-        self.schedule_blit()
+        self.schedule_blit(self._idle_blit_delay_ms)
 
     def stop(self):
         """Stop the blit timer before shutting down."""
@@ -510,6 +521,31 @@ class VTKWidget(QWidget):
         super().showEvent(event)
         self._ensure_plotter_initialized()
 
+    @staticmethod
+    def _qt_platform_name() -> str:
+        """Return the active Qt platform plugin name when available."""
+        env_name = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+        if env_name:
+            return env_name
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                return (app.platformName() or "").strip().lower()
+        except Exception:
+            pass
+        return ""
+
+    @classmethod
+    def _qt_platform_disables_vtk(cls) -> bool:
+        """
+        Return True when the active Qt backend cannot host a VTK viewport.
+
+        In headless checks we often run with Qt's ``offscreen`` or ``minimal``
+        platform plugins. Creating a PyVista plotter in those modes can crash
+        the process on macOS before the GUI has a chance to degrade gracefully.
+        """
+        return cls._qt_platform_name() in {"offscreen", "minimal", "minimalegl"}
+
     def _ensure_plotter_initialized(self):
         disable_vtk = os.environ.get("SVV_GUI_DISABLE_VTK", "").strip().lower() in {
             "1",
@@ -530,6 +566,21 @@ class VTKWidget(QWidget):
             self._plotter_init_in_progress = False
             return
 
+        if self._qt_platform_disables_vtk():
+            platform_name = self._qt_platform_name() or "unknown"
+            if getattr(self, "_vtk_placeholder", None) is not None:
+                self._vtk_placeholder.setText(
+                    "3D visualization disabled for the active Qt platform "
+                    f"({platform_name}).\n\n"
+                    "Use a windowed Qt backend to enable the VTK viewport."
+                )
+                self._vtk_placeholder.setStyleSheet(
+                    "padding: 20px; background-color: #FFF3CD; border: 1px solid #FFC107;"
+                )
+            self._plotter_init_failed = True
+            self._plotter_init_in_progress = False
+            return
+
         if self._plotter_init_done or self._plotter_init_in_progress or self._plotter_init_failed:
             return
         self._plotter_init_in_progress = True
@@ -539,7 +590,13 @@ class VTKWidget(QWidget):
 
     @staticmethod
     def _should_use_offscreen():
-        """Return True only for the known-bad macOS ARM + conda environment."""
+        """
+        Return True for the known-bad macOS ARM + conda environment.
+
+        Constructing ``QtInteractor`` can block the UI thread on this setup,
+        which means a later fallback is never reached. Default to the
+        offscreen/blit path there unless the user explicitly forces embedded.
+        """
         def _env_true(name):
             return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -577,12 +634,21 @@ class VTKWidget(QWidget):
         except Exception:
             pass
 
+        embedded_error = None
         if self._should_use_offscreen():
             self._init_plotter_offscreen(_pv)
         else:
-            self._init_plotter_embedded(_pv)
+            embedded_error = self._init_plotter_embedded(_pv)
+            if self.plotter is None and not self._plotter_init_failed and sys.platform == "darwin":
+                self._init_plotter_offscreen(_pv)
 
         if self.plotter is None or self._plotter_init_failed:
+            if embedded_error is not None and not self._plotter_init_failed:
+                self._show_vtk_error(
+                    f"3D Visualization unavailable:\n{embedded_error}\n\n"
+                    "Try installing PyVistaQt, or set SVV_GUI_FORCE_OFFSCREEN_VTK=1 "
+                    "to use the slower compatibility renderer."
+                )
             return
 
         self._setup_plotter_common()
@@ -592,26 +658,30 @@ class VTKWidget(QWidget):
         try:
             from pyvistaqt import QtInteractor as _QtInteractor
         except Exception as e:
-            self._show_vtk_error(
-                f"Failed to import PyVistaQt:\n{e}\n\n"
-                "Install it with: pip install pyvistaqt"
-            )
-            return
+            return e
 
         self._QtInteractor = _QtInteractor
 
         try:
-            self.plotter = _QtInteractor(self)
+            self.plotter = _QtInteractor(
+                self,
+                auto_update=False,
+                multi_samples=0,
+                line_smoothing=False,
+                point_smoothing=False,
+                polygon_smoothing=False,
+            )
             self._layout.addWidget(self.plotter.interactor)
             self._remove_placeholder()
+            return None
         except Exception as e:
-            self._show_vtk_error(
-                f"3D Visualization unavailable:\n{e}\n\n"
-                "This may be due to missing OpenGL libraries.\n"
-                "The GUI will function with limited 3D visualization.\n\n"
-                "To fix, install Mesa libraries:\n"
-                "conda install -c conda-forge mesalib"
-            )
+            try:
+                if self.plotter is not None:
+                    self.plotter.close()
+            except Exception:
+                pass
+            self.plotter = None
+            return e
 
     def _init_plotter_offscreen(self, _pv):
         """Create an offscreen plotter for the known-bad macOS environment."""
@@ -664,14 +734,15 @@ class VTKWidget(QWidget):
         bg_bottom = CADTheme.get_color('viewport', 'background-bottom')
         bg_top = CADTheme.get_color('viewport', 'background-top')
         self.plotter.set_background(bg_bottom, top=bg_top)
-        try:
-            self.plotter.enable_eye_dome_lighting()
-        except Exception:
-            pass
-        try:
-            self.plotter.enable_anti_aliasing()
-        except Exception:
-            pass
+        if not self._offscreen_mode:
+            try:
+                self.plotter.enable_eye_dome_lighting()
+            except Exception:
+                pass
+            try:
+                self.plotter.enable_anti_aliasing()
+            except Exception:
+                pass
         self.plotter.show_axes()
         self.plotter.camera_position = 'iso'
         self._init_scale_bar()
@@ -711,6 +782,80 @@ class VTKWidget(QWidget):
         self.plotter = None
         self._plotter_init_failed = True
         self._plotter_init_in_progress = False
+
+    def request_render(self, *, delay_ms=None):
+        """Render the plotter and refresh the compatibility viewport when needed."""
+        if not self.plotter:
+            return
+        try:
+            self.plotter.render()
+        except Exception:
+            return
+        if self._offscreen_mode and self._blit_widget is not None:
+            if delay_ms is None:
+                delay_ms = 0
+            self._blit_widget.schedule_blit(delay_ms=delay_ms)
+
+    def _batched_vessel_sides(self) -> int:
+        """Return the tube resolution used for batched vessel meshes."""
+        if self._offscreen_mode or sys.platform == "darwin":
+            return 12
+        return 16
+
+    @staticmethod
+    def _build_vessel_tube_mesh(pv_mod, proximal, distal, radii, *, n_sides=16):
+        """Build a single tube mesh from many independent vessel segments."""
+        try:
+            proximal = np.asarray(proximal, dtype=float)
+            distal = np.asarray(distal, dtype=float)
+            radii = np.asarray(radii, dtype=float).reshape(-1)
+        except Exception:
+            return None
+
+        if proximal.size == 0 or distal.size == 0 or radii.size == 0:
+            return None
+
+        try:
+            lengths = np.linalg.norm(distal - proximal, axis=1)
+        except Exception:
+            return None
+
+        valid = (
+            np.isfinite(lengths)
+            & np.isfinite(radii)
+            & (lengths > 1e-12)
+            & (radii > 0.0)
+        )
+        if not np.any(valid):
+            return None
+
+        proximal = proximal[valid]
+        distal = distal[valid]
+        radii = radii[valid]
+        n_segments = radii.shape[0]
+
+        points = np.empty((n_segments * 2, 3), dtype=float)
+        points[0::2] = proximal
+        points[1::2] = distal
+
+        lines = np.empty((n_segments, 3), dtype=np.int64)
+        lines[:, 0] = 2
+        segment_ids = np.arange(n_segments, dtype=np.int64)
+        lines[:, 1] = segment_ids * 2
+        lines[:, 2] = segment_ids * 2 + 1
+
+        try:
+            poly = pv_mod.PolyData(points)
+            poly.lines = lines.ravel()
+            poly.point_data["radius"] = np.repeat(radii, 2)
+            return poly.tube(
+                radius=float(radii.min()),
+                scalars="radius",
+                absolute=True,
+                n_sides=max(6, int(n_sides)),
+            )
+        except Exception:
+            return None
 
     def shutdown(self):
         """
@@ -985,10 +1130,7 @@ class VTKWidget(QWidget):
                 self.plotter.reset_camera()
             except Exception:
                 pass
-            try:
-                self.plotter.render()
-            except Exception:
-                pass
+            self.request_render()
 
         # Reset camera to show full domain. Some platform/runner combinations can hang
         # when rendering before the widget is realized, so defer a tick when needed.
@@ -1010,25 +1152,25 @@ class VTKWidget(QWidget):
     def view_iso(self):
         if self.plotter:
             self.plotter.view_isometric()
-            self.plotter.render()
+            self.request_render()
             self._show_hud("Isometric")
 
     def view_top(self):
         if self.plotter:
             self.plotter.view_xy()
-            self.plotter.render()
+            self.request_render()
             self._show_hud("Top")
 
     def view_front(self):
         if self.plotter:
             self.plotter.view_yz()
-            self.plotter.render()
+            self.request_render()
             self._show_hud("Front")
 
     def view_right(self):
         if self.plotter:
             self.plotter.view_xz()
-            self.plotter.render()
+            self.request_render()
             self._show_hud("Right")
 
     def add_start_point(self, point, index=None, color='red'):
@@ -1076,7 +1218,7 @@ class VTKWidget(QWidget):
             )
 
         self.points_actors.append(actor)
-        self.plotter.render()
+        self.request_render()
         return actor
 
     def add_direction(self, point, direction, length=None, color='blue'):
@@ -1135,7 +1277,7 @@ class VTKWidget(QWidget):
         )
 
         self.direction_actors.append((actor, cone_actor))
-        self.plotter.render()
+        self.request_render()
         return actor
 
     def add_tree(self, tree, color='red', label=None, group_id=None):
@@ -1159,21 +1301,54 @@ class VTKWidget(QWidget):
         if not self.plotter:
             return []
 
-        from svv.visualize.batch_cylinders import tree_to_merged_mesh
-
+        actors = []
         base = label or f"tree_{len(self.tree_actors)}"
-        merged = tree_to_merged_mesh(tree)
-        if merged is None:
-            return []
+        vessel_mesh = self._build_vessel_tube_mesh(
+            self._pv,
+            tree.data.get('proximal'),
+            tree.data.get('distal'),
+            tree.data.get('radius'),
+            n_sides=self._batched_vessel_sides(),
+        )
+        if vessel_mesh is not None:
+            actor = self.plotter.add_mesh(
+                vessel_mesh,
+                color=color,
+                specular=0.1,
+                smooth_shading=True,
+                name=base,
+            )
+            actors.append(actor)
+        else:
+            for i in range(tree.data.shape[0]):
+                center = (tree.data[i, 0:3] + tree.data[i, 3:6]) / 2
+                direction = tree.data.get('w_basis', i)
+                radius = tree.data.get('radius', i)
+                length = tree.data.get('length', i)
 
-        actor = self.plotter.add_mesh(merged, color=color, name=base)
-        actors = [actor]
+                vessel = self._pv.Cylinder(
+                    center=center,
+                    direction=direction,
+                    radius=radius,
+                    height=length
+                )
+                actor = self.plotter.add_mesh(
+                    vessel,
+                    color=color,
+                    name=f'{base}_vessel_{i}'
+                )
+                actors.append(actor)
+                if i % 100 == 0:
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
 
         self.tree_actors.extend(actors)
         if group_id is not None:
             self.tree_actor_groups[group_id] = actors
             self.tree_group_colors[group_id] = color
-        self.plotter.render()
+        self.request_render()
         return actors
 
     def add_connection_vessels(self, vessels, color='red', label=None, group_id=None):
@@ -1192,21 +1367,48 @@ class VTKWidget(QWidget):
         if not self.plotter:
             return []
 
-        from svv.visualize.batch_cylinders import segments_to_merged_mesh
-
+        actors = []
         base = label or f"connection_{len(self.connection_actors)}"
-        merged = segments_to_merged_mesh(vessels)
-        if merged is None:
-            return []
-
-        actor = self.plotter.add_mesh(merged, color=color, name=base)
-        actors = [actor]
-
+        vessel_mesh = self._build_vessel_tube_mesh(
+            self._pv,
+            vessels[:, 0:3],
+            vessels[:, 3:6],
+            vessels[:, 6],
+            n_sides=self._batched_vessel_sides(),
+        )
+        if vessel_mesh is not None:
+            actor = self.plotter.add_mesh(
+                vessel_mesh,
+                color=color,
+                specular=0.1,
+                smooth_shading=True,
+                name=base,
+            )
+            actors.append(actor)
+        else:
+            for idx, seg in enumerate(vessels):
+                p0 = seg[0:3]
+                p1 = seg[3:6]
+                radius = seg[6]
+                direction = p1 - p0
+                length = np.linalg.norm(direction)
+                if length <= 0:
+                    continue
+                direction = direction / length
+                center = (p0 + p1) / 2
+                cyl = self._pv.Cylinder(center=center, direction=direction, radius=radius, height=length)
+                actor = self.plotter.add_mesh(cyl, color=color, name=f"{base}_seg_{idx}")
+                actors.append(actor)
+                if idx % 200 == 0:
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
         self.connection_actors.extend(actors)
         if group_id is not None:
             self.connection_actor_groups[group_id] = actors
             self.connection_group_colors[group_id] = color
-        self.plotter.render()
+        self.request_render()
         return actors
 
     def clear_points(self):
@@ -1216,7 +1418,7 @@ class VTKWidget(QWidget):
         for actor in self.points_actors:
             self.plotter.remove_actor(actor)
         self.points_actors.clear()
-        self.plotter.render()
+        self.request_render()
 
     def clear_directions(self):
         """Clear all direction arrows."""
@@ -1226,7 +1428,7 @@ class VTKWidget(QWidget):
             for actor in actor_tuple:
                 self.plotter.remove_actor(actor)
         self.direction_actors.clear()
-        self.plotter.render()
+        self.request_render()
 
     def clear_trees(self):
         """Clear all tree visualizations."""
@@ -1237,7 +1439,7 @@ class VTKWidget(QWidget):
         self.tree_actors.clear()
         self.tree_actor_groups.clear()
         self.tree_group_colors.clear()
-        self.plotter.render()
+        self.request_render()
 
     def clear_connections(self):
         """Clear all connection visualizations."""
@@ -1251,7 +1453,7 @@ class VTKWidget(QWidget):
         self.connection_actors.clear()
         self.connection_actor_groups.clear()
         self.connection_group_colors.clear()
-        self.plotter.render()
+        self.request_render()
 
     def clear(self):
         """Clear all visualizations except the domain."""
@@ -1265,14 +1467,14 @@ class VTKWidget(QWidget):
         if not self.plotter:
             return
         self.plotter.reset_camera()
-        self.plotter.render()
+        self.request_render()
 
     def toggle_domain_visibility(self):
         """Toggle the visibility of the domain mesh."""
         if not self.plotter or self.domain_actor is None:
             return
         self.domain_actor.SetVisibility(not self.domain_actor.GetVisibility())
-        self.plotter.render()
+        self.request_render()
 
     def set_domain_edges_visible(self, visible: bool):
         """
@@ -1298,7 +1500,7 @@ class VTKWidget(QWidget):
                 self.domain_actor.GetProperty().SetEdgeVisibility(1 if self._domain_edges_visible else 0)
             except Exception:
                 pass
-        self.plotter.render()
+        self.request_render()
 
     def toggle_grid(self):
         """Toggle the visibility of the 3D grid."""
@@ -1337,7 +1539,7 @@ class VTKWidget(QWidget):
         except Exception:
             pass
 
-        self.plotter.render()
+        self.request_render()
 
     def is_grid_visible(self) -> bool:
         """
@@ -1510,7 +1712,7 @@ class VTKWidget(QWidget):
                 actor.SetVisibility(bool(visible))
             except Exception:
                 pass
-        self.plotter.render()
+        self.request_render()
 
     def set_network_visibility(self, net_idx: int, visible: bool):
         """
@@ -1541,7 +1743,7 @@ class VTKWidget(QWidget):
                         actor.SetVisibility(bool(visible))
                     except Exception:
                         pass
-        self.plotter.render()
+        self.request_render()
 
     # ---- Color helpers for Model Tree ----
     def set_tree_color(self, group_id, rgb):
@@ -1566,7 +1768,7 @@ class VTKWidget(QWidget):
             except Exception:
                 pass
         self.tree_group_colors[group_id] = rgb
-        self.plotter.render()
+        self.request_render()
 
     def set_connection_color(self, group_id, rgb):
         """
@@ -1590,7 +1792,7 @@ class VTKWidget(QWidget):
             except Exception:
                 pass
         self.connection_group_colors[group_id] = rgb
-        self.plotter.render()
+        self.request_render()
 
     def set_network_color(self, net_idx, rgb):
         """

@@ -16,6 +16,14 @@ from tqdm import trange, tqdm
 import random
 
 
+def _invoke_progress(progress_callback, progress=None, label=None, indeterminate=None):
+    if progress_callback is None:
+        return
+    if progress is not None:
+        progress = float(np.clip(progress, 0.0, 1.0))
+    progress_callback(progress, label, indeterminate)
+
+
 class Domain(object):
     def __init__(self, *args, **kwargs):
         """
@@ -180,7 +188,8 @@ class Domain(object):
                min_patch_size: int = 10,
                max_patch_size: int = 20,
                overlap: float = 0.2,
-               feature_angle: float = 30) -> None:
+               feature_angle: float = 30,
+               progress_callback=None) -> None:
         """
         Partition input data into spatial patches and initialize Patch objects.
 
@@ -220,35 +229,65 @@ class Domain(object):
           per‑patch coefficients, then `build()` to assemble the global implicit
           function and precompute fast‑evaluation arrays.
         """
+        last_progress = 0.0
+
+        def report(progress=None, label=None, indeterminate=None, force=False):
+            nonlocal last_progress
+            if progress is not None:
+                progress = max(last_progress, float(np.clip(progress, 0.0, 1.0)))
+                if not force and progress < 1.0 and (progress - last_progress) < 0.005:
+                    return
+                last_progress = progress
+            _invoke_progress(progress_callback, progress, label, indeterminate)
+
+        def map_stage(start, end):
+            span = end - start
+
+            def _stage_report(progress=None, label=None, indeterminate=None):
+                if progress is None:
+                    report(None, label, indeterminate)
+                else:
+                    report(start + span * progress, label, indeterminate)
+
+            return _stage_report
+
         self.patches = []
+        report(0.0, "Preparing domain patches...", force=True)
         if self.normals is None:
             patch_data = allocate(self.points,
                                   min_patch_size=min_patch_size,
                                   max_patch_size=max_patch_size,
                                   overlap=overlap,
-                                  feature_angle=feature_angle)
+                                  feature_angle=feature_angle,
+                                  progress_callback=map_stage(0.0, 0.7))
         else:
             patch_data = allocate(self.points, self.normals,
                                   min_patch_size=min_patch_size,
                                   max_patch_size=max_patch_size,
                                   overlap=overlap,
-                                  feature_angle=feature_angle)
-        has_normals = self.normals is not None
-        def _make_patch(data):
-            p = Patch()
-            if has_normals:
-                p.set_data(data[0], data[1])
+                                  feature_angle=feature_angle,
+                                  progress_callback=map_stage(0.0, 0.7))
+        total_patches = len(patch_data)
+        if total_patches == 0:
+            report(1.0, "No patches created", force=True)
+            return None
+        update_every = max(1, total_patches // 100)
+        for i in trange(total_patches, desc='Creating patches', unit='patch', leave=False,
+                        disable=progress_callback is not None):
+            self.patches.append(Patch())
+            if self.normals is None:
+                self.patches[-1].set_data(patch_data[i][0])
             else:
-                p.set_data(data[0])
-            return p
-        with ThreadPoolExecutor() as pool:
-            self.patches = list(tqdm(
-                pool.map(_make_patch, patch_data),
-                total=len(patch_data), desc='Creating patches',
-                unit='patch', leave=False))
+                self.patches[-1].set_data(patch_data[i][0], patch_data[i][1])
+            if (i + 1) % update_every == 0 or i + 1 == total_patches:
+                report(
+                    0.7 + 0.3 * ((i + 1) / total_patches),
+                    f"Creating patch kernels ({i + 1}/{total_patches})...",
+                )
+        report(1.0, "Domain patch creation complete", force=True)
         return None
 
-    def solve(self, method: str = "L-BFGS-B", precision: int = 9) -> None:
+    def solve(self, method: str = "L-BFGS-B", precision: int = 9, progress_callback=None) -> None:
         """
         Solve each Patch's interpolation problem before blending.
 
@@ -266,17 +305,25 @@ class Domain(object):
         This step computes per‑patch coefficients used later by `build()` to
         assemble the global implicit function and fast‑evaluation arrays.
         """
-        def _solve_patch(patch):
-            patch.solve(method=method, precision=precision)
-            return patch
-        with ThreadPoolExecutor() as pool:
-            self.patches = list(tqdm(
-                pool.map(_solve_patch, self.patches),
-                total=len(self.patches), desc='Solving patches',
-                unit='patch', leave=False))
+        total_patches = len(self.patches)
+        if total_patches == 0:
+            _invoke_progress(progress_callback, 1.0, "No patches to solve", None)
+            return None
+        update_every = max(1, total_patches // 100)
+        for i in trange(total_patches, desc='Solving patches', unit='patch', leave=False,
+                        disable=progress_callback is not None):
+            self.patches[i].solve(method=method, precision=precision)
+            if progress_callback is not None and ((i + 1) % update_every == 0 or i + 1 == total_patches):
+                _invoke_progress(
+                    progress_callback,
+                    (i + 1) / total_patches,
+                    f"Solving patches ({i + 1}/{total_patches})...",
+                    None,
+                )
+        _invoke_progress(progress_callback, 1.0, "Domain solve complete", None)
         return None
 
-    def build(self, resolution: int = 25, skip_boundary: bool = False) -> None:
+    def build(self, resolution: int = 25, skip_boundary: bool = False, progress_callback=None) -> None:
         """
         Assemble the global implicit function and optional boundary/mesh artifacts.
 
@@ -298,7 +345,19 @@ class Domain(object):
         # A/B/C/D/PTS and possibly a function_tree. In that case, skip
         # rebuilding from patches (which will be empty) and only ensure
         # downstream artifacts as requested.
+        last_progress = 0.0
+
+        def report(progress=None, label=None, indeterminate=None, force=False):
+            nonlocal last_progress
+            if progress is not None:
+                progress = max(last_progress, float(np.clip(progress, 0.0, 1.0)))
+                if not force and progress < 1.0 and (progress - last_progress) < 0.005:
+                    return
+                last_progress = progress
+            _invoke_progress(progress_callback, progress, label, indeterminate)
+
         if len(getattr(self, 'patches', [])) == 0 and hasattr(self, 'PTS'):
+            report(0.0, "Rebuilding cached domain structures...", force=True)
             if getattr(self, 'function_tree', None) is None:
                 # Reconstruct a function_tree from stored PTS arrays
                 # PTS shape: (n_patches, max_pts, 1, 1, 1, d)
@@ -314,6 +373,7 @@ class Domain(object):
                 self.function_tree = cKDTree(np.asarray(firsts))
             if self.random_generator is None:
                 self.set_random_generator()
+            report(0.35, "Cached evaluator ready")
             if not skip_boundary:
                 # Check if boundary/mesh were already loaded from .dmn file
                 # If so, skip expensive regeneration
@@ -323,16 +383,29 @@ class Domain(object):
                     getattr(self, 'mesh_tree', None) is not None
                 )
                 if not has_boundary:
+                    report(0.5, "Extracting domain boundary...")
                     self.get_boundary(resolution)
+                    report(0.7, "Domain boundary extracted")
                 if not has_mesh:
+                    if self.points.shape[1] == 3:
+                        report(None, "Tetrahedralizing domain interior...", True)
+                    else:
+                        report(0.75, "Triangulating domain interior...")
                     self.get_interior()
+                    report(0.95, "Interior mesh ready", False)
+            report(1.0, "Domain build complete", False, force=True)
             return None
         functions = []
         firsts = []
-        for patch in self.patches:
+        total_patches = len(self.patches)
+        update_every = max(1, total_patches // 100) if total_patches > 0 else 1
+        report(0.0, "Building patch functions...", force=True)
+        for i, patch in enumerate(self.patches):
             func = patch.build()
             firsts.append(func.first)
             functions.append(func)
+            if (i + 1) % update_every == 0 or i + 1 == total_patches:
+                report(0.4 * ((i + 1) / total_patches), f"Building patch functions ({i + 1}/{total_patches})...")
         self.function_tree = cKDTree(np.array(firsts))
         function_list = set(tuple(list(range(len(functions)))))
         self.functions = functions
@@ -356,11 +429,20 @@ class Domain(object):
         # Pre-compute normalize_scale for evaluate_fast
         self._normalize_scale = np.linalg.norm(np.max(self.points, axis=0) - np.min(self.points, axis=0))
         # for fast evaluation
+        report(0.55, "Fast evaluation structures assembled")
         if self.random_generator is None:
             self.set_random_generator()
         if not skip_boundary:
+            report(0.65, "Extracting domain boundary...")
             self.get_boundary(resolution)
+            report(0.8, "Domain boundary extracted")
+            if self.points.shape[1] == 3:
+                report(None, "Tetrahedralizing domain interior...", True)
+            else:
+                report(0.82, "Triangulating domain interior...")
             self.get_interior()
+            report(0.97, "Interior mesh ready", False)
+        report(1.0, "Domain build complete", False, force=True)
         return None
 
     def __call__(self, points, **kwargs):

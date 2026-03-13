@@ -16,6 +16,14 @@ from .c_allocate import (
 _ANGLE_SCALE = 180.0 / np.pi
 
 
+def _invoke_progress(progress_callback, progress=None, label=None, indeterminate=None):
+    if progress_callback is None:
+        return
+    if progress is not None:
+        progress = float(np.clip(progress, 0.0, 1.0))
+    progress_callback(progress, label, indeterminate)
+
+
 def _as_index_array(indices: np.ndarray) -> np.ndarray:
     array = np.asarray(indices, dtype=np.int64)
     if array.ndim == 0:
@@ -35,7 +43,7 @@ def _deduplicate_indices(indices: np.ndarray, unique_inverse: np.ndarray) -> np.
 
 # [TODO] the allocator needs to be accelerated to handle large point clouds
 def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_size: int = 20,
-             overlap: float = 0.2, feature_angle: float = 30) -> list:
+             overlap: float = 0.2, feature_angle: float = 30, progress_callback=None) -> list:
     """
     Create a list of patches from a set of points and normals, if provided, from a point cloud.
 
@@ -58,6 +66,17 @@ def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_
         patches : list
             A list of tuples containing the points and normals of each patch.
     """
+    last_progress = 0.0
+
+    def report(progress=None, label=None, indeterminate=None, force=False):
+        nonlocal last_progress
+        if progress is not None:
+            progress = max(last_progress, float(np.clip(progress, 0.0, 1.0)))
+            if not force and progress < 1.0 and (progress - last_progress) < 0.005:
+                return
+            last_progress = progress
+        _invoke_progress(progress_callback, progress, label, indeterminate)
+
     if len(args) == 0:
         print("Error: No data provided.")
         return [None, None]
@@ -79,6 +98,8 @@ def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_
             normals = normals[indices, :]
             magnitudes = norm(normals)
         normals = normals / magnitudes
+
+    report(0.0, "Preparing point cloud for patch allocation...", force=True)
 
     _, unique_inverse, unique_counts = np.unique(points, axis=0, return_inverse=True, return_counts=True)
     duplicates, duplicate_set = duplicate_map(unique_inverse, unique_counts)
@@ -131,7 +152,15 @@ def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_
     if neighbor_indices.ndim == 1:
         neighbor_indices = neighbor_indices[:, np.newaxis]
 
-    progress_bar = tqdm.tqdm(total=len(point_set), desc='Allocating patches', unit='point', leave=False)
+    progress_bar = tqdm.tqdm(
+        total=len(point_set),
+        desc='Allocating patches',
+        unit='point',
+        leave=False,
+        disable=progress_callback is not None,
+    )
+    processed_main = 0
+    consumed_total = 0
     while len(point_set) > 0:
         progress_start = len(point_set)
         point_idx = point_set.pop()
@@ -144,18 +173,42 @@ def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_
             indices = _deduplicate_indices(indices, unique_inverse)
         if len(indices) < min_patch_size:
             remaining_points.append(point_idx)
-            continue
-        patch_points.append(points[indices, :])
-        if normals is not None:
-            patch_normals.append(normals[indices, :])
         else:
-            patch_normals.append(None)
-        point_set = _allocate_patch(indices, overlap, point_set, duplicate_set)
+            patch_points.append(points[indices, :])
+            if normals is not None:
+                patch_normals.append(normals[indices, :])
+            else:
+                patch_normals.append(None)
+            point_set = _allocate_patch(indices, overlap, point_set, duplicate_set)
         progress_end = len(point_set)
-        progress_bar.update(progress_start - progress_end)
+        consumed_this_seed = progress_start - progress_end
+        processed_main += 1
+        consumed_total += consumed_this_seed
+        progress_bar.update(consumed_this_seed)
+
+        avg_consumed_per_seed = consumed_total / processed_main
+        estimated_main_remaining = len(point_set) / max(avg_consumed_per_seed, 1.0)
+        deferred_rate = len(remaining_points) / processed_main
+        estimated_remaining_work = len(remaining_points) + deferred_rate * estimated_main_remaining
+        estimated_total_work = processed_main + estimated_main_remaining + estimated_remaining_work
+        if estimated_total_work > 0:
+            report(
+                processed_main / estimated_total_work,
+                "Allocating patches (estimating remaining seeds)...",
+            )
     progress_bar.close()
 
-    progress_bar = tqdm.tqdm(total=len(remaining_points), desc='Allocating remaining patches', unit='point', leave=False)
+    progress_bar = tqdm.tqdm(
+        total=len(remaining_points),
+        desc='Allocating remaining patches',
+        unit='point',
+        leave=False,
+        disable=progress_callback is not None,
+    )
+    processed_remaining = 0
+    total_work = processed_main + len(remaining_points)
+    if total_work > 0 and len(remaining_points) > 0:
+        report(processed_main / total_work, "Allocating small remaining patches...", force=True)
     while len(remaining_points) > 0:
         progress_start = len(remaining_points)
         point_idx = remaining_points.pop()
@@ -180,4 +233,12 @@ def allocate(*args: Tuple[np.ndarray, ...], min_patch_size: int = 10, max_patch_
             patch_normals.append(None)
         progress_end = len(remaining_points)
         progress_bar.update(progress_start - progress_end)
+        processed_remaining += 1
+        if total_work > 0:
+            report(
+                (processed_main + processed_remaining) / total_work,
+                "Allocating small remaining patches...",
+            )
+    progress_bar.close()
+    report(1.0, "Patch allocation complete", force=True)
     return list(zip(patch_points, patch_normals))

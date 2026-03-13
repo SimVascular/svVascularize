@@ -1,5 +1,7 @@
 import os
 import sys
+import ctypes
+import ctypes.util
 
 # CRITICAL: Set GL environment BEFORE any Qt/VTK imports
 # This must happen at module import time
@@ -72,6 +74,62 @@ from svv.visualize.gui.main_window import VascularizeGUI
 VascularizeCADGUI = VascularizeGUI  # Backwards compatibility alias
 
 
+def _set_macos_activation_policy(policy: str) -> bool:
+    """
+    Update the macOS NSApplication activation policy.
+
+    This allows the GUI to appear as a normal Dock application while visible,
+    then demote back to an accessory app after shutdown so an interactive
+    Python process can continue without leaving a stale Dock icon behind.
+    """
+    if sys.platform != 'darwin':
+        return False
+
+    policy_value = {
+        "regular": 0,
+        "accessory": 1,
+        "prohibited": 2,
+    }.get(policy)
+    if policy_value is None:
+        return False
+
+    try:
+        objc_path = ctypes.util.find_library("objc")
+        appkit_path = ctypes.util.find_library("AppKit")
+        if not objc_path or not appkit_path:
+            return False
+
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+        ctypes.cdll.LoadLibrary(appkit_path)
+
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        objc_msg_send_id = ctypes.CFUNCTYPE(
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+        )(("objc_msgSend", objc))
+        objc_msg_send_bool_long = ctypes.CFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long
+        )(("objc_msgSend", objc))
+
+        ns_application = objc.objc_getClass(b"NSApplication")
+        if not ns_application:
+            return False
+
+        shared_sel = objc.sel_registerName(b"sharedApplication")
+        set_policy_sel = objc.sel_registerName(b"setActivationPolicy:")
+
+        app = objc_msg_send_id(ns_application, shared_sel)
+        if not app:
+            return False
+
+        return bool(objc_msg_send_bool_long(app, set_policy_sel, policy_value))
+    except Exception:
+        return False
+
+
 def launch_gui(domain=None, block=True, style=None):
     """
     Launch the Vascularize GUI from a Python interpreter or script.
@@ -117,6 +175,29 @@ def launch_gui(domain=None, block=True, style=None):
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("svVascularize")
+    try:
+        app.setQuitOnLastWindowClosed(True)
+    except Exception:
+        pass
+    _set_macos_activation_policy("regular")
+
+    platform_name = ""
+    try:
+        platform_name = (app.platformName() or "").strip().lower()
+    except Exception:
+        platform_name = ""
+
+    try:
+        screens = list(app.screens())
+    except Exception:
+        screens = []
+
+    if platform_name not in {"offscreen", "minimal", "minimalegl"} and not screens:
+        raise RuntimeError(
+            "No display screens are available for the active Qt backend. "
+            "Run the GUI inside a logged-in desktop session, or set "
+            "QT_QPA_PLATFORM=offscreen and SVV_GUI_DISABLE_VTK=1 for headless checks."
+        )
 
     # Set application icon if available
     icon_path = Path(__file__).with_name("svIcon.png")
@@ -177,6 +258,11 @@ def launch_gui(domain=None, block=True, style=None):
     # Mark this session as running; a clean shutdown will clear this flag.
     settings.setValue("session/running", True)
 
+    try:
+        app.aboutToQuit.connect(lambda: _set_macos_activation_policy("accessory"))
+    except Exception:
+        pass
+
     # Single unified GUI style
     gui = VascularizeGUI(domain=domain)
     if icon_path.is_file():
@@ -191,6 +277,7 @@ def launch_gui(domain=None, block=True, style=None):
         app.exec()
     except AttributeError:
         app.exec_()
+    _set_macos_activation_policy("accessory")
     return None
 
 

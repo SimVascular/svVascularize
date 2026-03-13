@@ -1,6 +1,4 @@
-from svv.tree.export.export_solid import (get_branches, get_points, get_radii, get_normals,
-                                                polyline_from_points, generate_polylines, generate_tube,
-                                                generate_tubes, union_tubes)
+from svv.tree.export.write_splines import get_branches, get_points, get_radii, get_normals
 from scipy.interpolate import splprep, splev
 import numpy as np
 import numpy
@@ -169,7 +167,7 @@ def export_spline(tree_connections, extrude_roots=False):
                 network_xyzr.append(splprep(xyzr, k=1, s=0))
                 # interp_n.append(splprep(n, k=1, s=0))
             elif p.shape[1] == 3:
-                interp_xyz.append(splprep(p, k=2, s=0))
+                network_xyz.append(splprep(p, k=2, s=0))
                 rr = numpy.vstack((network_xyz[-1][1], r))
                 network_r.append(splprep(rr, k=1, s=0))
                 xyzr = numpy.vstack((p, r))
@@ -191,42 +189,53 @@ def export_spline(tree_connections, extrude_roots=False):
 def write_splines(ALL_POINTS, ALL_RADII, spline_sample_points=100, seperate=False, write_splines=True, outdir=None,
                   name_prefix=None):
     ALL_SPLINES = []
+    if write_splines and outdir is None:
+        outdir = os.getcwd()
     for network in range(len(ALL_POINTS)):
         network_splines = []
         if write_splines:
-            if outdir is None:
-                outdir = os.getcwd()
             if name_prefix is None:
                 name = "network_{}_b_splines.txt".format(network)
             else:
                 name = "{}_network_{}_b_splines.txt".format(name_prefix, network)
-            spline_file = open(outdir + os.sep + name, "w+")
-        for vessel in range(len(ALL_POINTS[network])):
-            pt_array = np.array(ALL_POINTS[network][vessel])
-            r_array = np.array(ALL_RADII[network][vessel]).reshape(-1, 1)
-            pt_r_combined = deepcopy(np.hstack((pt_array, r_array)).T)
-            vessel_ctr = splprep(pt_r_combined, s=0)
-            def vessel_spline(t, ctr=vessel_ctr):
-                return splev(t, ctr[0])
-            #vessel_spline = deepcopy(lambda t: splev(t, deepcopy(vessel_ctr[0])))
-            network_splines.append(deepcopy(vessel_spline))
-            if write_splines:
-                spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, spline_sample_points))
-                t = np.linspace(0, 1, num=spline_sample_points)
-                data = deepcopy(vessel_spline(t))
-                for k in range(spline_sample_points):
-                    if k > spline_sample_points // 2:
-                        label = 1
-                    else:
-                        label = 0
-                    if seperate:
-                        spline_file.write(
-                                    '{}, {}, {}, {}, {}\n'.format(data[0][k], data[1][k], data[2][k], data[3][k],
-                                                                  label))
-                    else:
-                        spline_file.write(
-                                    '{}, {}, {}, {}\n'.format(data[0][k], data[1][k], data[2][k], data[3][k]))
-                spline_file.write('\n')
-        spline_file.close()
+            spline_path = outdir + os.sep + name
+            with open(spline_path, "w+", encoding="utf-8") as spline_file:
+                for vessel in range(len(ALL_POINTS[network])):
+                    pt_array = np.array(ALL_POINTS[network][vessel])
+                    r_array = np.array(ALL_RADII[network][vessel]).reshape(-1, 1)
+                    pt_r_combined = deepcopy(np.hstack((pt_array, r_array)).T)
+                    vessel_ctr = splprep(pt_r_combined, s=0)
+
+                    def vessel_spline(t, ctr=vessel_ctr):
+                        return splev(t, ctr[0])
+
+                    network_splines.append(deepcopy(vessel_spline))
+                    spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, spline_sample_points))
+                    t = np.linspace(0, 1, num=spline_sample_points)
+                    data = deepcopy(vessel_spline(t))
+                    for k in range(spline_sample_points):
+                        label = 1 if k > spline_sample_points // 2 else 0
+                        if seperate:
+                            spline_file.write(
+                                '{}, {}, {}, {}, {}\n'.format(
+                                    data[0][k], data[1][k], data[2][k], data[3][k], label
+                                )
+                            )
+                        else:
+                            spline_file.write(
+                                '{}, {}, {}, {}\n'.format(data[0][k], data[1][k], data[2][k], data[3][k])
+                            )
+                    spline_file.write('\n')
+        else:
+            for vessel in range(len(ALL_POINTS[network])):
+                pt_array = np.array(ALL_POINTS[network][vessel])
+                r_array = np.array(ALL_RADII[network][vessel]).reshape(-1, 1)
+                pt_r_combined = deepcopy(np.hstack((pt_array, r_array)).T)
+                vessel_ctr = splprep(pt_r_combined, s=0)
+
+                def vessel_spline(t, ctr=vessel_ctr):
+                    return splev(t, ctr[0])
+
+                network_splines.append(deepcopy(vessel_spline))
         ALL_SPLINES.append(network_splines)
-        return ALL_SPLINES
+    return ALL_SPLINES

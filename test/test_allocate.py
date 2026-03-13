@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 
+from svv.domain.domain import Domain
 from svv.domain.routines.allocate import allocate
 
 @pytest.fixture
@@ -180,3 +181,62 @@ def test_allocate_invalid_overlap(simple_points):
     # Overlap = -0.5 => clipped to 0
     patches = allocate(simple_points, min_patch_size=2, max_patch_size=3, overlap=-0.5)
     assert isinstance(patches, list), "Should still return a list."
+
+
+def test_allocate_progress_callback_is_monotonic():
+    """
+    Progress callbacks should report monotonic normalized progress and finish at 1.0.
+    """
+    rng = np.random.default_rng(42)
+    pts = rng.random((64, 3))
+    updates = []
+
+    def on_progress(progress, label=None, indeterminate=None):
+        updates.append((progress, label, indeterminate))
+
+    patches = allocate(
+        pts,
+        min_patch_size=5,
+        max_patch_size=12,
+        overlap=0.1,
+        progress_callback=on_progress,
+    )
+
+    assert isinstance(patches, list)
+    progress_values = [progress for progress, _, _ in updates if progress is not None]
+    assert progress_values, "Expected at least one progress update."
+    assert progress_values[0] == pytest.approx(0.0)
+    assert progress_values[-1] == pytest.approx(1.0)
+    assert all(
+        b >= a for a, b in zip(progress_values, progress_values[1:])
+    ), "Progress callback values should be monotonic."
+    assert any(
+        label == "Allocating patches (estimating remaining seeds)..."
+        for _, label, _ in updates
+    ), "Expected adaptive seed-estimate progress messages from allocate()."
+
+
+def test_domain_create_progress_callback_reaches_completion(simple_points):
+    """
+    Domain.create should surface normalized progress from allocation through patch creation.
+    """
+    domain = Domain(simple_points)
+    updates = []
+
+    def on_progress(progress, label=None, indeterminate=None):
+        updates.append((progress, label, indeterminate))
+
+    domain.create(
+        min_patch_size=2,
+        max_patch_size=3,
+        overlap=0.2,
+        progress_callback=on_progress,
+    )
+
+    assert len(domain.patches) > 0
+    progress_values = [progress for progress, _, _ in updates if progress is not None]
+    assert progress_values[0] == pytest.approx(0.0)
+    assert progress_values[-1] == pytest.approx(1.0)
+    assert all(
+        b >= a for a, b in zip(progress_values, progress_values[1:])
+    ), "Domain.create progress should be monotonic."

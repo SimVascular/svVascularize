@@ -228,6 +228,8 @@ class ParameterPanel(QWidget):
             self._connect_future = None
         # Shut down executor threads
         try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
             self._executor.shutdown(wait=False)
         except Exception:
             pass

@@ -26,6 +26,40 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _normalize_menu_title(title: str) -> str:
+    return title.replace("&", "").strip()
+
+
+def _assert_main_window_ui(gui) -> None:
+    from PySide6.QtCore import Qt
+
+    expected_menu_titles = ["File", "View", "Generate", "Fabricate", "Simulate", "Help"]
+    menu_titles = [_normalize_menu_title(action.text()) for action in gui.menuBar().actions()]
+    if menu_titles != expected_menu_titles:
+        raise AssertionError(
+            f"Expected main menu titles {expected_menu_titles}, got {menu_titles}"
+        )
+
+    toolbars = [gui.file_toolbar, gui.view_toolbar, gui.gen_toolbar]
+    visible_toolbars = [toolbar.windowTitle() for toolbar in toolbars if toolbar.isVisible()]
+    if len(visible_toolbars) != 3:
+        raise AssertionError(
+            f"Expected 3 visible main toolbars, got {len(visible_toolbars)}: {visible_toolbars}"
+        )
+
+    mispositioned = [
+        toolbar.windowTitle()
+        for toolbar in toolbars
+        if gui.toolBarArea(toolbar) != Qt.TopToolBarArea
+    ]
+    if mispositioned:
+        raise AssertionError(f"Expected top-area toolbars, found misplaced toolbars: {mispositioned}")
+
+    embedded_menu_bar = gui.solution_inspector.embedded_menu_bar
+    if embedded_menu_bar.isNativeMenuBar():
+        raise AssertionError("Solution Inspector menu bar unexpectedly owns the native menu bar")
+
+
 @contextmanager
 def _temp_cwd():
     """Run work in a temp dir to avoid polluting the repo with tmp.mesh files."""
@@ -50,23 +84,33 @@ def _gui_smoke_process(result_queue) -> None:
         if sys.platform == "win32" and (os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI")):
             os.environ.setdefault("SVV_GUI_DISABLE_VTK", "1")
 
-        from PySide6.QtCore import QTimer
+        from PySide6.QtCore import QSettings, QTimer
         from PySide6.QtWidgets import QApplication
         from svv.visualize.gui.main_window import VascularizeGUI
 
-        _log("SMOKE: gui: starting QApplication")
-        app = QApplication.instance() or QApplication(sys.argv[:1])
+        with tempfile.TemporaryDirectory(prefix="svv-smoke-settings-") as settings_dir:
+            # Keep toolbar/menu assertions independent of any saved local layout.
+            QSettings.setDefaultFormat(QSettings.IniFormat)
+            QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir)
 
-        _log("SMOKE: gui: constructing main window")
-        gui = VascularizeGUI(domain=None)
-        gui.show()
-        _log("SMOKE: gui: shown; entering event loop")
+            _log("SMOKE: gui: starting QApplication")
+            app = QApplication.instance() or QApplication(sys.argv[:1])
 
-        # Quit shortly after show() so we validate initialization without
-        # hanging on shutdown paths that can be flaky in headless CI.
-        QTimer.singleShot(1500, app.quit)
-        app.exec()
-        _log("SMOKE: gui: event loop exited")
+            _log("SMOKE: gui: constructing main window")
+            gui = VascularizeGUI(domain=None)
+            gui.show()
+            app.processEvents()
+            # Exercise the docked inspector state where macOS native menu-bar ownership matters.
+            gui._show_solution_inspector()
+            app.processEvents()
+            _assert_main_window_ui(gui)
+            _log("SMOKE: gui: shown; assertions passed; entering event loop")
+
+            # Quit shortly after show() so we validate initialization without
+            # hanging on shutdown paths that can be flaky in headless CI.
+            QTimer.singleShot(1500, app.quit)
+            app.exec()
+            _log("SMOKE: gui: event loop exited")
 
         result_queue.put(("ok", None))
         try:

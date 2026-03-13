@@ -1,4 +1,3 @@
-import pyvista
 from scipy.interpolate import splprep, splev
 import numpy as np
 import numpy

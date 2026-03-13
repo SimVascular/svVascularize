@@ -110,7 +110,7 @@ def export_0d_simulation(forest, network_id, inlets, steady=True, outdir=None, f
     if path_to_0d_solver is not None:
         resolved_solver_0d = path_to_0d_solver
         print(f"Using explicit svZeroDSolver path: {resolved_solver_0d}")
-    else:
+    elif get_0d_solver:
         try:
             resolved_solver_0d = str(get_solver_0d_exe())
             print(f"Using svZeroDSolver executable: {resolved_solver_0d}")

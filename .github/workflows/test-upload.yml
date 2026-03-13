@@ -105,6 +105,16 @@ jobs:
           print("svzerodsolver -h exit:", proc.returncode)
           PY
 
+      - name: Set up Python 3.9 for release smoke test (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Run release smoke test in fresh Python 3.9 env (macOS)
+        if: runner.os == 'macOS'
+        run: bash .github/scripts/release_smoke_macos_py39.sh
+
       - name: Validate built wheel(s) (Windows)
         if: runner.os == 'Windows'
         run: |
