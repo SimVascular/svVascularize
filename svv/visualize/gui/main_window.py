@@ -1946,14 +1946,59 @@ class VascularizeGUI(QMainWindow):
             return
 
         try:
+            import numpy as np
+            from pathlib import Path as _Path
+
             written = export_spline_files(
                 obj,
                 file_path,
                 spline_sample_points=spline_sample_points,
                 separate=seperate,
             )
+
+            # Write companion boundary points file when requested.
+            if export_boundary and written:
+                def _get_start_point(tree):
+                    data = np.asarray(tree.data)
+                    if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] < 6:
+                        return None
+                    root_idx = np.where(np.isnan(data[:, 17]))[0]
+                    if len(root_idx) == 0:
+                        return None
+                    return data[root_idx[0], 0:3].copy()
+
+                inlets, outlets = [], []
+                if hasattr(obj, "networks"):
+                    for network in (getattr(obj, "networks", []) or []):
+                        for i in range(0, len(network), 2):
+                            pt = _get_start_point(network[i])
+                            if pt is not None:
+                                inlets.append(pt)
+                            if i + 1 < len(network):
+                                pt = _get_start_point(network[i + 1])
+                                if pt is not None:
+                                    outlets.append(pt)
+                else:
+                    pt = _get_start_point(obj)
+                    if pt is not None:
+                        inlets.append(pt)
+
+                bp_path = _Path(written[0]).with_name(
+                    _Path(written[0]).stem + "_inlet_outlet.txt"
+                )
+                with bp_path.open("w", encoding="utf-8") as f:
+                    f.write("inlet\n")
+                    for p in inlets:
+                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
+                    f.write("outlet\n")
+                    for p in outlets:
+                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
+
             if len(written) == 1:
-                self.update_status(f"Splines exported to {written[0]}")
+                if export_boundary:
+                    self.update_status(f"Splines exported to {written[0]}  |  boundary points → {bp_path.name}")
+                else:
+                    self.update_status(f"Splines exported to {written[0]}")
                 return
 
             if hasattr(written[0], "parent"):
@@ -1962,7 +2007,10 @@ class VascularizeGUI(QMainWindow):
                     "Splines Exported",
                     f"Exported {len(written)} spline file(s) to:\n{written[0].parent}"
                 )
-                self.update_status(f"Exported {len(written)} spline file(s)")
+                if export_boundary:
+                    self.update_status(f"Exported {len(written)} spline file(s)  |  boundary points → {bp_path.name}")
+                else:
+                    self.update_status(f"Exported {len(written)} spline file(s)")
         except Exception as e:
             self._record_telemetry(e, action="export_splines")
             QMessageBox.critical(
