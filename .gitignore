@@ -40,6 +40,9 @@ macos_gui_report.*
 biventricular.txt
 biventricular_inlet_outlet.txt
 
+# Claude Code project instructions (local only)
+CLAUDE.md
+
 # Local GUI docs and scripts (ignored)
 CAD_GUI_DOCUMENTATION.md
 CAD_GUI_SUMMARY.md
