@@ -682,7 +682,7 @@ class Domain(object):
             raise ValueError("Only 2D and 3D domains are supported.")
         cell_centers = _mesh.cell_centers().points[:, :self.points.shape[1]]
         self.mesh_tree = cKDTree(cell_centers, leafsize=4)
-        # Reuse cKDTree for radius queries instead of building a separate BallTree
+        # mesh_tree_2 kept as alias for backward compatibility
         self.mesh_tree_2 = self.mesh_tree
         self.mesh = _mesh
         self.mesh_nodes = nodes.astype(np.float64)
@@ -779,12 +779,12 @@ class Domain(object):
                             cells_outer = np.arange(self.mesh.n_cells, dtype=np.int64)
                         else:
                             #cells_0 = self.mesh_tree_2.query_radius(tree.active_tree.data, volume_threshold)
-                            cells_0 = self.mesh_tree_2.query_ball_point(tree, volume_threshold)
+                            cells_0 = self.mesh_tree.query_ball_point(tree, volume_threshold)
                             cells_outer = np.unique(np.concatenate(cells_0))
                         #_ = [cells_outer.extend(cell) for cell in cells_0]
                         #cells_1 = tree.query_ball_tree(self.mesh_tree, threshold, eps=threshold/100)
                         #cells_1 = self.mesh_tree_2.query_radius(tree.active_tree.data, threshold)
-                        cells_1 = self.mesh_tree_2.query_ball_point(tree, threshold)
+                        cells_1 = self.mesh_tree.query_ball_point(tree, threshold)
                         #cells_inner = []
                         #_ = [cells_inner.extend(cell) for cell in cells_1]
                         cells_inner = np.unique(np.concatenate(cells_1))

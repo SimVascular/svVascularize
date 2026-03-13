@@ -78,23 +78,37 @@ def minimum_segment_distance(data_0: np.ndarray, data_1: np.ndarray) -> np.ndarr
 
     denom = AB_AB_exp * CD_CD_exp - AB_CD * AB_CD  # (N, M)
 
-    # General case: skew lines
-    t = (AB_CD * CA_CD - CA_AB * CD_CD_exp) / np.where(np.abs(denom) < 1e-14, 1.0, denom)
-    s = (AB_AB_exp * CA_CD - AB_CD * CA_AB) / np.where(np.abs(denom) < 1e-14, 1.0, denom)
-    t = np.clip(t, 0.0, 1.0)
-    s = np.clip(s, 0.0, 1.0)
+    # Cascading clamp re-projection (Ericson, "Real-Time Collision Detection")
+    is_par = np.abs(denom) < 1e-14
+    safe_denom = np.where(is_par, 1.0, denom)
+    safe_AB_AB = np.where(AB_AB_exp < 1e-14, 1.0, AB_AB_exp)
+    safe_CD_CD = np.where(CD_CD_exp < 1e-14, 1.0, CD_CD_exp)
+
+    # Step 1: Compute unconstrained t and clamp to [0,1]
+    t = np.where(is_par, 0.0,
+                 np.clip((AB_CD * CA_CD - CA_AB * CD_CD_exp) / safe_denom, 0.0, 1.0))
+
+    # Step 2: Compute s from clamped t
+    s_raw = (t * AB_CD + CA_CD) / safe_CD_CD
+
+    # Step 3: If s out of [0,1], clamp s and re-project t
+    needs_s_low = s_raw < 0.0
+    needs_s_high = s_raw > 1.0
+    s = np.clip(s_raw, 0.0, 1.0)
+
+    t_for_s0 = np.clip(-CA_AB / safe_AB_AB, 0.0, 1.0)
+    t_for_s1 = np.clip((AB_CD - CA_AB) / safe_AB_AB, 0.0, 1.0)
+    t = np.where(needs_s_low, t_for_s0, t)
+    t = np.where(needs_s_high, t_for_s1, t)
 
     P1 = A0_exp + t[:, :, None] * AB_exp  # (N, M, 3)
     P2 = B0_exp + s[:, :, None] * CD_exp  # (N, M, 3)
     general_dist = np.linalg.norm(P1 - P2, axis=2)  # (N, M)
 
-    # Handle degenerate/parallel cases
+    # Handle degenerate cases (zero-length segments)
     is_degen_A = AB_AB < 1e-14  # (N,)
     is_degen_B = CD_CD < 1e-14  # (M,)
-    is_parallel = np.abs(denom) < 1e-14  # (N, M)
-
-    # Only compute fallbacks where needed
-    needs_fallback = is_parallel | is_degen_A[:, None] | is_degen_B[None, :]
+    needs_fallback = is_degen_A[:, None] | is_degen_B[None, :]
 
     if np.any(needs_fallback):
         out = general_dist.copy()
@@ -104,23 +118,13 @@ def minimum_segment_distance(data_0: np.ndarray, data_1: np.ndarray) -> np.ndarr
             ii, jj = fb_i[idx], fb_j[idx]
             a0, a1 = A0[ii], A1[ii]
             c0, c1 = B0[jj], B1[jj]
-            ab_ab_val = AB_AB[ii]
-            cd_cd_val = CD_CD[jj]
 
-            if ab_ab_val < 1e-14 and cd_cd_val < 1e-14:
+            if AB_AB[ii] < 1e-14 and CD_CD[jj] < 1e-14:
                 out[ii, jj] = float(np.linalg.norm(a0 - c0))
-            elif ab_ab_val < 1e-14:
+            elif AB_AB[ii] < 1e-14:
                 out[ii, jj] = _point_to_segment_distance(*a0, *c0, *c1)
-            elif cd_cd_val < 1e-14:
-                out[ii, jj] = _point_to_segment_distance(*c0, *a0, *a1)
             else:
-                # Parallel: check 4 endpoint-segment distances
-                out[ii, jj] = min(
-                    _point_to_segment_distance(*a0, *c0, *c1),
-                    _point_to_segment_distance(*a1, *c0, *c1),
-                    _point_to_segment_distance(*c0, *a0, *a1),
-                    _point_to_segment_distance(*c1, *a0, *a1),
-                )
+                out[ii, jj] = _point_to_segment_distance(*c0, *a0, *a1)
         return out
     return general_dist
 

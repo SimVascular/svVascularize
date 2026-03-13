@@ -499,36 +499,37 @@ class TestSegmentDistanceAccuracy:
         return dists.min()
 
     def test_accuracy_vs_bruteforce(self):
-        """Vectorized result should be a reasonable approximation.
+        """Vectorized result should match or beat brute-force sampling.
 
-        The vectorized clamping approach (independent t,s clamping after
-        solving the unconstrained problem) can overshoot the true minimum
-        for near-parallel or degenerate segment configurations. This test
-        characterizes accuracy: the vast majority of pairs should be
-        within 5%, and the median error should be very small.
+        The cascading clamp re-projection gives the analytical minimum,
+        so vectorized distances should be <= brute-force (which is limited
+        by sampling resolution). We compare using a tolerance that accounts
+        for the brute-force sampling error.
         """
         rng = np.random.default_rng(42)
         n = 20
         data0 = _random_3d_segments(n, rng, spread=5.0)
         data1 = _random_3d_segments(n, rng, spread=5.0)
         vectorized = minimum_segment_distance(data0, data1)
-        rel_errors = []
+        overestimates = []
         for i in range(n):
             for j in range(n):
                 bf = self._brute_force_segment_distance(data0[i], data1[j])
                 assert vectorized[i, j] >= 0
                 if bf > 0.1:
-                    rel_errors.append(abs(vectorized[i, j] - bf) / bf)
-        rel_errors = np.array(rel_errors)
-        # Median error should be small
-        assert np.median(rel_errors) < 0.05, (
-            f"Median relative error {np.median(rel_errors):.4f} too high"
+                    # Vectorized should be <= brute-force (analytical vs sampled)
+                    # Allow small tolerance for brute-force sampling noise
+                    overestimate = (vectorized[i, j] - bf) / bf
+                    overestimates.append(overestimate)
+        overestimates = np.array(overestimates)
+        # Vectorized should never significantly overestimate the true distance
+        # (it computes the exact analytical minimum)
+        assert np.max(overestimates) < 0.02, (
+            f"Vectorized overestimates brute-force by {np.max(overestimates):.4f}"
         )
-        # At least 80% of pairs should be within 10%
-        # (independent clamping can overshoot for near-parallel segments)
-        pct_within_10 = np.mean(rel_errors < 0.10)
-        assert pct_within_10 > 0.80, (
-            f"Only {pct_within_10:.1%} of pairs within 10% error"
+        # Median should be near zero or negative (vec <= bf)
+        assert np.median(overestimates) < 0.01, (
+            f"Median overestimate {np.median(overestimates):.4f} too high"
         )
 
     def test_known_perpendicular_segments(self):
