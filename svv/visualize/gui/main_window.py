@@ -1911,14 +1911,49 @@ class VascularizeGUI(QMainWindow):
         seperate_cb.setToolTip("If checked, write an extra label column for proximal vs distal points.")
         form.addRow("", seperate_cb)
 
-        boundary_cb = QCheckBox("X-CAVATE Export boundary points (inlet/outlet)")
-        boundary_cb.setChecked(True)
-        boundary_cb.setToolTip(
-            "Write a companion file listing inlet and outlet coordinates.\n"
-            "Inlets are the root (start) points of each tree.\n"
-            "Outlets are the terminal (leaf) vessel endpoints."
+        export_roots_cb = QCheckBox("Export inlet/outlet root sidecar")
+        export_roots_cb.setChecked(False)
+        export_roots_cb.setToolTip(
+            "Write a companion file beside each spline export listing root connection points "
+            "labeled as inlet or outlet."
         )
-        form.addRow("", boundary_cb)
+        form.addRow("", export_roots_cb)
+
+        is_tree = isinstance(obj, _svv_tree_mod.Tree)
+        is_forest = isinstance(obj, _svv_forest_mod.Forest)
+
+        tree_root_role_combo = None
+        if is_tree:
+            tree_root_role_combo = QComboBox()
+            tree_root_role_combo.addItems(["inlet", "outlet"])
+            tree_root_role_combo.setCurrentText("inlet")
+            tree_root_role_combo.setToolTip("Label the exported tree root point as an inlet or outlet.")
+            form.addRow("Root role:", tree_root_role_combo)
+
+        inlet_tree_edits = {}
+        if is_forest:
+            tree_counts = {
+                net_idx: int(count)
+                for net_idx, count in enumerate(getattr(obj, "n_trees_per_network", []) or [])
+            }
+            for net_idx, network in enumerate(getattr(obj, "networks", []) or []):
+                tree_counts[net_idx] = max(tree_counts.get(net_idx, 0), len(network))
+            tree_connections = getattr(getattr(obj, "connections", None), "tree_connections", None) or []
+            for fallback_idx, tree_connection in enumerate(tree_connections):
+                network_id = int(getattr(tree_connection, "network_id", fallback_idx))
+                tree_counts[network_id] = max(
+                    tree_counts.get(network_id, 0),
+                    len(getattr(tree_connection, "connected_network", []) or []),
+                )
+
+            for network_id in sorted(tree_counts):
+                inlet_edit = QLineEdit("0" if tree_counts[network_id] > 0 else "")
+                inlet_edit.setToolTip(
+                    "Comma-separated list of tree indices to label as inlets for this network. "
+                    "Trees not listed are labeled as outlets."
+                )
+                form.addRow(f"Network {network_id} inlet trees:", inlet_edit)
+                inlet_tree_edits[network_id] = inlet_edit
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dlg.accept)
@@ -1934,7 +1969,36 @@ class VascularizeGUI(QMainWindow):
 
         spline_sample_points = sample_spin.value()
         seperate = seperate_cb.isChecked()
-        export_boundary = boundary_cb.isChecked()
+        export_inlet_outlet_roots = export_roots_cb.isChecked()
+
+        tree_root_role = None
+        inlet_tree_indices_by_network = None
+        if export_inlet_outlet_roots:
+            if tree_root_role_combo is not None:
+                tree_root_role = tree_root_role_combo.currentText().strip().lower()
+            if inlet_tree_edits:
+                inlet_tree_indices_by_network = {}
+                for network_id, inlet_edit in inlet_tree_edits.items():
+                    text = inlet_edit.text().strip()
+                    if not text:
+                        inlet_tree_indices_by_network[network_id] = set()
+                        continue
+                    try:
+                        inlet_tree_indices_by_network[network_id] = {
+                            int(part.strip()) for part in text.split(",") if part.strip() != ""
+                        }
+                    except ValueError:
+                        QMessageBox.warning(
+                            self,
+                            "Invalid Inlet Trees",
+                            "Each network inlet tree list must be a comma-separated list of integers."
+                        )
+                        self._record_telemetry(
+                            message="Invalid inlet tree list format for spline export dialog",
+                            level="warning",
+                            action="export_splines_invalid_inlet_roots",
+                        )
+                        return
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -1954,6 +2018,9 @@ class VascularizeGUI(QMainWindow):
                 file_path,
                 spline_sample_points=spline_sample_points,
                 separate=seperate,
+                export_inlet_outlet_roots=export_inlet_outlet_roots,
+                tree_root_role=tree_root_role,
+                inlet_tree_indices_by_network=inlet_tree_indices_by_network,
             )
 
             # Write companion boundary points file when requested.
@@ -1995,20 +2062,24 @@ class VascularizeGUI(QMainWindow):
                         f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
 
             if len(written) == 1:
-                if export_boundary:
-                    self.update_status(f"Splines exported to {written[0]}  |  boundary points → {bp_path.name}")
+                if export_inlet_outlet_roots:
+                    sidecar_name = f"{Path(written[0]).stem}_inlet_outlet.txt"
+                    self.update_status(f"Splines exported to {written[0]} | root sidecar -> {sidecar_name}")
                 else:
                     self.update_status(f"Splines exported to {written[0]}")
                 return
 
             if hasattr(written[0], "parent"):
+                message = f"Exported {len(written)} spline file(s) to:\n{written[0].parent}"
+                if export_inlet_outlet_roots:
+                    message += "\n\nMatching inlet/outlet root sidecars were written beside each spline file."
                 QMessageBox.information(
                     self,
                     "Splines Exported",
-                    f"Exported {len(written)} spline file(s) to:\n{written[0].parent}"
+                    message
                 )
-                if export_boundary:
-                    self.update_status(f"Exported {len(written)} spline file(s)  |  boundary points → {bp_path.name}")
+                if export_inlet_outlet_roots:
+                    self.update_status(f"Exported {len(written)} spline file(s) with root sidecars")
                 else:
                     self.update_status(f"Exported {len(written)} spline file(s)")
         except Exception as e:
