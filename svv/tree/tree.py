@@ -21,6 +21,21 @@ from svv.tree.utils.c_extend import build_c_vessel_map
 from collections import ChainMap
 
 
+class CenterlineResult(tuple):
+    """Backward-compatible result from :meth:`Tree.export_centerlines`.
+
+    Unpacks as a 2-tuple ``(centerlines, polys)`` so that existing code
+    ``centerlines, polys = tree.export_centerlines()`` continues to work.
+    Boundary-point metadata is available via the ``.boundary_points``
+    attribute.
+    """
+
+    def __new__(cls, centerlines, polys, boundary_points=None):
+        instance = super().__new__(cls, (centerlines, polys))
+        instance.boundary_points = boundary_points if boundary_points is not None else []
+        return instance
+
+
 class Tree(object):
     def __init__(
         self,
@@ -324,7 +339,8 @@ class Tree(object):
                     #_, counts = np.unique(self.vessel_map[key]['downstream'], return_counts=True)
                     #assert np.all(counts == 1), "Fail in appending downstream idxs"
                 else:
-                    self.vessel_map[key] = deepcopy(new_vessel_map[key])
+                    self.vessel_map[key] = {'upstream': list(new_vessel_map[key]['upstream']),
+                                             'downstream': list(new_vessel_map[key]['downstream'])}
             end_chunk_4_3 = perf_counter()
             self.times['chunk_4_3'].append(end_chunk_4_3 - start_chunk_4_3)
             #self.vessel_map = ChainMap(new_vessel_map, self.vessel_map)
@@ -585,13 +601,20 @@ class Tree(object):
 
         Returns
         -------
-        centerlines : pyvista.PolyData
-            Centerline polydata with radius and section-area arrays.
-        polys : list[pyvista.PolyData]
-            Per-branch polylines used to construct the merged centerline set.
+        result : CenterlineResult
+            A 2-tuple ``(centerlines, polys)`` for backward compatibility.
+            Access ``result.boundary_points`` for inlet/outlet metadata.
+
+            - **centerlines** — merged :class:`pyvista.PolyData` with radius,
+              section-area, and ``BoundaryType`` arrays.
+            - **polys** — per-branch polylines.
+            - **boundary_points** — list of dicts with keys ``type``
+              ('inlet'/'outlet'), ``point`` (3-element array) and ``radius``.
         """
-        centerlines, polys = build_centerlines(self, points_per_unit_length=points_per_unit_length)
-        return centerlines, polys
+        centerlines, polys, boundary_points = build_centerlines(
+            self, points_per_unit_length=points_per_unit_length,
+        )
+        return CenterlineResult(centerlines, polys, boundary_points)
 
 
     def export_gcode(self):

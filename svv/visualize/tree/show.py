@@ -1,5 +1,6 @@
 import pyvista
-from tqdm import trange
+
+from svv.visualize.batch_cylinders import tree_to_merged_mesh
 
 def show(tree, color='red', plot_domain=False, return_plotter=False, **kwargs):
     """
@@ -43,9 +44,7 @@ def show(tree, color='red', plot_domain=False, return_plotter=False, **kwargs):
 
     Notes
     -----
-    The function uses a progress bar from `tqdm` to provide feedback during the plotting process.
-    This can be useful when dealing with large trees, as it shows the progress of building the plot
-    in real time.
+    The function uses batch cylinder rendering for efficient visualization of large trees.
 
     Examples
     --------
@@ -67,17 +66,12 @@ def show(tree, color='red', plot_domain=False, return_plotter=False, **kwargs):
 
     """
     plotter = pyvista.Plotter(**kwargs)
-    for i in trange(tree.data.shape[0], desc='Building plot', unit='vessel', leave=False):
-        center = (tree.data[i, 0:3] + tree.data[i, 3:6]) / 2
-        direction = tree.data.get('w_basis', i)
-        radius = tree.data.get('radius', i)
-        length = tree.data.get('length', i)
-        vessel = pyvista.Cylinder(center=center, direction=direction, radius=radius, height=length)
-        plotter.add_mesh(vessel, color=color)
+    merged = tree_to_merged_mesh(tree)
+    if merged is not None:
+        plotter.add_mesh(merged, color=color)
     if plot_domain:
         plotter.add_mesh(tree.domain.boundary, color='grey', opacity=0.25)
     if return_plotter:
         return plotter
     else:
         plotter.show()
-
