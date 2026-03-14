@@ -7,7 +7,7 @@ channels:
   - conda-forge
 dependencies:
   - python>=3.9,<3.12
-  - numpy
+  - numpy<2
   - psutil
   - pyside6>=6.4
   - pyvista>=0.41

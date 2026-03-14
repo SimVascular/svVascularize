@@ -32,5 +32,14 @@ The package is published on PyPI as `svv`:
 pip install svv
 ```
 
+If you are installing into an existing environment and hit NumPy ABI errors such as
+`_ARRAY_API not found` or `numpy.core.multiarray failed to import`, reinstall in a
+clean environment with NumPy 1.x:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install --force-reinstall "numpy<2" svv
+```
+
 On clusters / HPC systems (for example Stanford Sherlock), use a recent Python (3.9–3.12) and `pip`, and install into a 
 clean virtual environment or user site-packages. 

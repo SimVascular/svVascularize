@@ -186,6 +186,11 @@
 python -m svv.visualize.gui --domain path/to/domain.dmn</code></pre>
       <p style="margin:0">If point-picking does not work, ensure the domain was created/solved/built before loading.</p>
     </div>
+
+    <div class="callout warning">
+      <strong>NumPy compatibility:</strong>
+      <p style="margin:.5rem 0 0">If importing the GUI fails with <code>_ARRAY_API not found</code> or <code>numpy.core.multiarray failed to import</code>, the environment likely mixed <code>numpy&gt;=2</code> with an older compiled dependency. Reinstall in a clean environment with <code>python -m pip install --force-reinstall "numpy&lt;2" svv</code>.</p>
+    </div>
   </main>
 
   <footer>

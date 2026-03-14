@@ -47,6 +47,7 @@
       <pre data-copy><code class="language-shell">python -m pip install --upgrade pip  # upgrade installer
 python -m pip install svv</code></pre>
       <p>This installs the <em>core</em> pre-built synthetic vascular-generation wheel from PyPI.</p>
+      <div class="callout warning"><strong>Troubleshooting:</strong> If you see NumPy ABI errors such as <code>_ARRAY_API not found</code> or <code>numpy.core.multiarray failed to import</code>, recreate the environment and reinstall with <code>python -m pip install --force-reinstall "numpy&lt;2" svv</code>.</div>
       <div class="callout"><strong>Need hemodynamics solvers?</strong> They are not included by default—see <a href="#simulation">Simulation extras</a>.</div>
     </section>
 
@@ -59,7 +60,7 @@ python -m pip install svv</code></pre>
     <li><strong>Memory:</strong> 2 GB RAM minimum (8 GB recommended for large vascular trees).</li>
         <li><strong>C++17 tool-chain:</strong> required <em>only</em> for source builds (see call-out below).</li>
         <li><strong>Build-time Python deps:</strong> <code>cython&nbsp;&ge;0.29&nbsp;&lt;3.0</code>,
-        <code>wheel</code>, <code>numpy&nbsp;&ge;1.22</code> (pulled in automatically by
+        <code>wheel</code>, <code>numpy&nbsp;&ge;1.24&nbsp;&lt;2</code> (pulled in automatically by
         <code>pip</code>).</li>
       </ul>
       <!-- platform-specific tool-chain tips -->

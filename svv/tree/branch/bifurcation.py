@@ -21,9 +21,17 @@ from svv.tree.utils.c_obb import obb_any
 from svv.tree.utils.c_angle import get_angles
 from svv.tree.utils.c_extend import update_alt
 from scipy.sparse import coo_matrix, lil_matrix
-import numexpr as ne
 import matplotlib.pyplot as plt
-ne.set_num_threads(min(16, max(1, os.cpu_count() or 1)))
+
+_NUMEXPR = None
+if int(str(np.__version__).split(".", 1)[0]) < 2:
+    try:
+        import numexpr as _NUMEXPR
+    except Exception:
+        _NUMEXPR = None
+
+if _NUMEXPR is not None:
+    _NUMEXPR.set_num_threads(min(16, max(1, os.cpu_count() or 1)))
 
 #[TODO] angle constraint to make sure that daughters are wide enough apart
 #[TODO] remove terminal and parent sister collision constraint
@@ -1939,10 +1947,15 @@ def scale_column_with_multiply(array, col_index, scalar, out_index):
 """
 
 def ne_multiply(column, scalar, out):
-    ne.evaluate('column * scalar', out=out)
+    if _NUMEXPR is None:
+        np.multiply(column, scalar, out=out)
+        return
+    _NUMEXPR.evaluate('column * scalar', out=out)
 
 def ne_scale(radius, length, radius_exp, length_exp):
-    scale = np.pi * ne.evaluate('sum(radius ** radius_exp * length ** length_exp)')
+    if _NUMEXPR is None:
+        return np.pi * np.sum(radius ** radius_exp * length ** length_exp)
+    scale = np.pi * _NUMEXPR.evaluate('sum(radius ** radius_exp * length ** length_exp)')
     return scale
 
 def get_points(tree, n_points, **kwargs):
