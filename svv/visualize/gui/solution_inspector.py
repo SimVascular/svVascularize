@@ -6922,6 +6922,13 @@ class SolutionInspectorWidget(QWidget):
         self._current_scalar_name = None
         self._scalar_label_auto_text = ""
         self.scalar_label_edit.clear()
+        has_time_series = len(self._time_values) > 1
+
+        if getattr(self, "auto_range_cb", None) and self.auto_range_cb.isChecked():
+            self.global_range_cb.blockSignals(True)
+            self.global_range_cb.setChecked(has_time_series)
+            self.global_range_cb.blockSignals(False)
+
         if self._time_values:
             self.time_slider.setEnabled(True)
             self.time_slider.setRange(0, len(self._time_values) - 1)

@@ -236,3 +236,43 @@ def test_solution_inspector_time_change_uses_pvd_time_point_api(monkeypatch):
     assert renders == [(2, False)]
 
     _close_gui(app, gui)
+
+
+def test_solution_inspector_load_solution_enables_global_range_for_time_series(monkeypatch, tmp_path):
+    app, gui = _make_gui(monkeypatch)
+    inspector = gui.solution_inspector
+
+    class _FakeReader:
+        def __init__(self):
+            self.time_values = [0.0, 0.1, 0.2]
+
+        def set_active_time_point(self, _idx):
+            pass
+
+        def read(self):
+            return object()
+
+    class _FakePV:
+        class MultiBlock:
+            pass
+
+        @staticmethod
+        def get_reader(_path):
+            return _FakeReader()
+
+    solution_path = tmp_path / "timeseries.pvd"
+    solution_path.write_text("<VTKFile/>", encoding="utf-8")
+
+    monkeypatch.setattr(inspector, "_update_mesh_from_reader", lambda *args, **kwargs: None)
+    monkeypatch.setattr(inspector, "_populate_scalar_fields", lambda: None)
+    monkeypatch.setattr(inspector, "_populate_vector_fields", lambda: None)
+    monkeypatch.setattr(inspector, "_update_statistics", lambda: None)
+
+    inspector._pv = _FakePV()
+    inspector.auto_range_cb.setChecked(True)
+    inspector.global_range_cb.setChecked(False)
+
+    assert inspector._load_solution(str(solution_path)) is True
+    assert inspector.global_range_cb.isChecked() is True
+
+    _close_gui(app, gui)
