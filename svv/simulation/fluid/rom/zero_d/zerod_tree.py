@@ -184,14 +184,10 @@ def export_0d_simulation(tree ,steady=True ,outdir=None ,folder="0d_tmp" ,number
                 bc_values["Q"] = [q_in, q_in]
                 bc_values["t"] = [0, 1]
             else:
-                if isinstance(flow, type(None)):
-                    time, flow_wave = generate_physiologic_wave(tree.data[vessel, 22], tree.data[vessel, 21] * 2)
-                    bc_values["Q"] = np.asarray(flow_wave, dtype=float).tolist()
-                    bc_values["t"] = np.asarray(time, dtype=float).tolist()
-                else:
-                    q_in = float(flow)
-                    bc_values["Q"] = [q_in, q_in]
-                    bc_values["t"] = [0, 1]
+                q_in = float(tree.data[vessel, 22]) if isinstance(flow, type(None)) else float(flow)
+                time, flow_wave = generate_physiologic_wave(q_in, tree.data[vessel, 21] * 2)
+                bc_values["Q"] = np.asarray(flow_wave, dtype=float).tolist()
+                bc_values["t"] = np.asarray(time, dtype=float).tolist()
                 if bc_values["Q"]:
                     bc_values["Q"][-1] = bc_values["Q"][0]
                 simulation_parameters["number_of_time_pts_per_cardiac_cycle"] = len(bc_values["Q"])
