@@ -276,3 +276,44 @@ def test_solution_inspector_load_solution_enables_global_range_for_time_series(m
     assert inspector.global_range_cb.isChecked() is True
 
     _close_gui(app, gui)
+
+
+def test_solution_inspector_manual_scalar_range_persists_across_time_changes(monkeypatch):
+    app, gui = _make_gui(monkeypatch)
+    inspector = gui.solution_inspector
+
+    class _FakeReader:
+        def __init__(self):
+            self.active_idx = 0
+
+        def set_active_time_point(self, idx):
+            self.active_idx = idx
+
+        def read(self):
+            return object()
+
+    class _FakePV:
+        class MultiBlock:
+            pass
+
+    monkeypatch.setattr(inspector, "_compute_local_range", lambda _name: (0.0, 100.0))
+    monkeypatch.setattr(inspector, "_render_current_mesh", lambda *, reset_camera=False: None)
+    monkeypatch.setattr(inspector, "_update_calculator_mesh", lambda: None)
+
+    inspector._pv = _FakePV()
+    inspector._reader = _FakeReader()
+    inspector._time_values = [0.0, 0.1, 0.2]
+    inspector._current_scalar_name = "Pressure [mmHg]"
+    inspector._current_mesh = object()
+    inspector.global_range_cb.setChecked(False)
+    inspector.auto_range_cb.setChecked(False)
+    inspector.scalar_min_spin.setValue(1.2)
+    inspector.scalar_max_spin.setValue(9.8)
+
+    inspector._on_time_index_changed(2)
+
+    assert inspector._current_time_index == 2
+    assert inspector.scalar_min_spin.value() == 1.2
+    assert inspector.scalar_max_spin.value() == 9.8
+
+    _close_gui(app, gui)

@@ -7241,7 +7241,7 @@ class SolutionInspectorWidget(QWidget):
         if rng is None:
             return
         vmin, vmax = rng
-        if not self.auto_range_cb.isChecked():
+        if self.auto_range_cb.isChecked():
             self.scalar_min_spin.blockSignals(True)
             self.scalar_max_spin.blockSignals(True)
             self.scalar_min_spin.setValue(vmin)
