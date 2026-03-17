@@ -2133,7 +2133,7 @@ class TimeSeriesPlotDialog(QDialog):
         layout.addLayout(tools_layout)
 
         # Store plot data for refreshing
-        self._plot_data = []  # List of (times, values, label) tuples
+        self._plot_data = []  # List of (times, values, label[, color]) tuples
         self._lines = []  # matplotlib line objects
         self._xlabel = "Time"
         self._ylabel = "Value"
@@ -2707,8 +2707,11 @@ class TimeSeriesPlotDialog(QDialog):
         # Clear previous derivative
         self._clear_derivative()
 
-        # Use first data series
-        times, values, label = self._plot_data[0]
+        # Use first data series; support legacy 3-tuples and current 4-tuples.
+        data_tuple = self._plot_data[0]
+        times = data_tuple[0]
+        values = data_tuple[1]
+        label = data_tuple[2]
         times = np.asarray(times)
         values = np.asarray(values)
 

@@ -1,4 +1,5 @@
 import pytest
+import sys
 
 pytest.importorskip("PySide6")
 
@@ -316,4 +317,43 @@ def test_solution_inspector_manual_scalar_range_persists_across_time_changes(mon
     assert inspector.scalar_min_spin.value() == 1.2
     assert inspector.scalar_max_spin.value() == 9.8
 
+    _close_gui(app, gui)
+
+
+def test_time_series_dialog_derivative_accepts_colored_plot_tuples(monkeypatch):
+    app, gui = _make_gui(monkeypatch)
+    module = sys.modules[type(gui.solution_inspector).__module__]
+    dialog = module.TimeSeriesPlotDialog(gui)
+
+    class _FakeLine:
+        pass
+
+    class _FakeAxes:
+        def plot(self, *_args, **_kwargs):
+            return [_FakeLine()]
+
+        def legend(self, *_args, **_kwargs):
+            return None
+
+    class _FakeFigure:
+        def tight_layout(self):
+            return None
+
+    class _FakeCanvas:
+        def draw(self):
+            return None
+
+    monkeypatch.setattr(dialog, "_clear_derivative", lambda: None)
+    dialog._mpl_available = True
+    dialog._ax = _FakeAxes()
+    dialog._fig = _FakeFigure()
+    dialog._canvas = _FakeCanvas()
+    dialog.deriv_separate_cb.setChecked(False)
+    dialog._plot_data = [([0.0, 1.0, 2.0], [1.0, 3.0, 5.0], "Series A", "blue")]
+
+    dialog._compute_derivative()
+
+    assert dialog._derivative_line is not None
+
+    dialog.close()
     _close_gui(app, gui)
