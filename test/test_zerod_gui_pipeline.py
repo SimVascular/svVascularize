@@ -192,3 +192,47 @@ def test_solution_inspector_plotter_ready_replays_pending_camera_reset(monkeypat
     assert inspector._pending_camera_reset is False
 
     _close_gui(app, gui)
+
+
+def test_solution_inspector_time_change_uses_pvd_time_point_api(monkeypatch):
+    app, gui = _make_gui(monkeypatch)
+    inspector = gui.solution_inspector
+
+    class _FakeMesh:
+        def __init__(self, idx):
+            self.idx = idx
+
+    class _FakeReader:
+        def __init__(self):
+            self.active_idx = 0
+            self.time_values = [0.0, 0.1, 0.2]
+            self.calls = []
+
+        def set_active_time_point(self, idx):
+            self.calls.append(idx)
+            self.active_idx = idx
+
+        def read(self):
+            return _FakeMesh(self.active_idx)
+
+    class _FakePV:
+        class MultiBlock:
+            pass
+
+    renders = []
+    monkeypatch.setattr(inspector, "_update_scalar_range", lambda: None)
+    monkeypatch.setattr(inspector, "_render_current_mesh", lambda *, reset_camera=False: renders.append((inspector._current_mesh.idx, reset_camera)))
+    monkeypatch.setattr(inspector, "_update_calculator_mesh", lambda: None)
+
+    inspector._pv = _FakePV()
+    inspector._reader = _FakeReader()
+    inspector._time_values = [0.0, 0.1, 0.2]
+
+    inspector._on_time_index_changed(2)
+
+    assert inspector._reader.calls == [2]
+    assert inspector._current_time_index == 2
+    assert inspector._current_mesh.idx == 2
+    assert renders == [(2, False)]
+
+    _close_gui(app, gui)
