@@ -1284,7 +1284,7 @@ class VTKWidget(QWidget):
 
     def add_tree(self, tree, color='red', label=None, group_id=None):
         """
-        Add a Tree visualization.
+        Add a Tree visualization using batch cylinder rendering.
 
         Parameters
         ----------
@@ -1340,7 +1340,6 @@ class VTKWidget(QWidget):
                     name=f'{base}_vessel_{i}'
                 )
                 actors.append(actor)
-                # Periodically process Qt events to keep the GUI responsive
                 if i % 100 == 0:
                     try:
                         QApplication.processEvents()
@@ -1356,7 +1355,7 @@ class VTKWidget(QWidget):
 
     def add_connection_vessels(self, vessels, color='red', label=None, group_id=None):
         """
-        Add connecting vessels (array of segments with radius).
+        Add connecting vessels using batch cylinder rendering.
 
         Parameters
         ----------
@@ -1369,6 +1368,7 @@ class VTKWidget(QWidget):
             return []
         if not self.plotter:
             return []
+
         actors = []
         base = label or f"connection_{len(self.connection_actors)}"
         vessel_mesh = self._build_vessel_tube_mesh(

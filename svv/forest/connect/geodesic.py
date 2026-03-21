@@ -9,45 +9,57 @@ def geodesic_constructor(domain, **kwargs):
     """
     Construct a general geodesic function solver for a given domain.
 
+    Builds a sparse graph from the tetrahedral mesh edges and provides
+    a function to compute shortest (geodesic) paths between any two
+    3D points. Uses Dijkstra with source caching so that repeated
+    queries from the same source node avoid redundant computation.
+
     Parameters
     ----------
     domain : svtoolkit.domain.Domain
         The domain object that defines the spatial region in which vascular
         trees are generated.
-    kwargs : dict
-        Additional keyword arguments.
-        Keyword arguments include:
-
 
     Returns
     -------
     get_geodesic : function
         A function that computes the geodesic path between two points.
     """
-    idx = [[0, 1], [1, 2], [2, 0], [0, 3], [3, 1], [2, 3]]
+    # Build edge list from tetrahedra using vectorized operations
+    edge_pairs = numpy.array([[0, 1], [1, 2], [2, 0], [0, 3], [3, 1], [2, 3]])
     tetra = domain.mesh.cells.reshape(-1, 5)[:, 1:]
-    lengths = []
-    nodes = []
-    added_nodes = set([])
-    tetra_node_tree = cKDTree(domain.mesh.points)
-    for i in range(tetra.shape[0]):
-        tet = tetra[i, :]
-        for cx in idx:
-            if tuple([tet[cx[0]], tet[cx[1]]]) in added_nodes:
-                continue
-            added_nodes.add(tuple([tet[cx[0]], tet[cx[1]]]))
-            added_nodes.add(tuple([tet[cx[1]], tet[cx[0]]]))
-            nodes.append([tet[cx[0]], tet[cx[1]]])
-            nodes.append([tet[cx[1]], tet[cx[0]]])
-            length = numpy.linalg.norm(domain.mesh.points[tet[cx[0]], :] - domain.mesh.points[tet[cx[1]], :])
-            lengths.append(length)
-            lengths.append(length)
-    M = numpy.array(nodes)
-    L = numpy.array(lengths)
-    graph = csr_matrix((L, (M[:, 0], M[:, 1])), shape=(numpy.max(M[:, 0]) + 1, numpy.max(M[:, 1]) + 1))
 
-    def get_path(start, end, graph=graph, shortest_path=shortest_path):
-        dist, pred = shortest_path(csgraph=graph, directed=False, indices=start, return_predecessors=True)
+    # Extract all edges at once: shape (n_tetra * 6, 2)
+    all_edges = tetra[:, edge_pairs].reshape(-1, 2)
+
+    # Canonicalize edges (smaller index first) and deduplicate
+    sorted_edges = numpy.sort(all_edges, axis=1)
+    unique_edges = numpy.unique(sorted_edges, axis=0)
+
+    # Compute lengths for unique edges
+    pts = domain.mesh.points
+    edge_lengths = numpy.linalg.norm(pts[unique_edges[:, 0]] - pts[unique_edges[:, 1]], axis=1)
+
+    # Build symmetric edge arrays
+    rows = numpy.concatenate([unique_edges[:, 0], unique_edges[:, 1]])
+    cols = numpy.concatenate([unique_edges[:, 1], unique_edges[:, 0]])
+    weights = numpy.concatenate([edge_lengths, edge_lengths])
+
+    n_nodes = pts.shape[0]
+    graph = csr_matrix((weights, (rows, cols)), shape=(n_nodes, n_nodes))
+
+    tetra_node_tree = cKDTree(pts)
+
+    # Cache Dijkstra results per source node to avoid recomputation
+    _dijkstra_cache = {}
+
+    def get_path(start, end):
+        if start not in _dijkstra_cache:
+            dist, pred = shortest_path(csgraph=graph, directed=False,
+                                       indices=start, return_predecessors=True)
+            _dijkstra_cache[start] = (dist, pred)
+        dist, pred = _dijkstra_cache[start]
+
         path = [end]
         dists = []
         k = end
@@ -57,27 +69,19 @@ def geodesic_constructor(domain, **kwargs):
             k = pred[k]
         path = path[::-1]
         dists = dists[::-1]
-        lines = []
-        for i in range(len(path) - 1):
-            lines.append([path[i], path[i + 1]])
+        lines = [[path[i], path[i + 1]] for i in range(len(path) - 1)]
         return path, dists, lines
 
     def get_geodesic(start, end, tetra_node_tree=tetra_node_tree, get_path=get_path):
         """
-        Get the geodesic path between two points
+        Get the geodesic path between two points.
 
         Parameters
         ----------
         start : numpy.ndarray
-            The starting point.
+            The starting point (3D coordinates).
         end : numpy.ndarray
-            The ending point.
-        tetra_node_tree : scipy.spatial.cKDTree
-            The tree of the tetrahedral nodes. This parameter is partially applied and
-            should not be modified.
-        get_path : function
-            The function that computes the path between two nodes. This parameter is
-            partially applied and should not be modified.
+            The ending point (3D coordinates).
 
         Returns
         -------
@@ -92,5 +96,6 @@ def geodesic_constructor(domain, **kwargs):
         jnd = tetra_node_tree.query(end)[1]
         path, dists, lines = get_path(ind, jnd)
         return path, dists, lines
+
     return get_geodesic
 

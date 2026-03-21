@@ -1,19 +1,18 @@
 import numpy as np
 import pyvista as pv
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree, ConvexHull
 from svv.domain.patch import Patch
 from svv.domain.routines.allocate import allocate
 from svv.domain.routines.discretize import contour
 from svv.domain.io.read import read
 from svv.domain.routines.tetrahedralize import tetrahedralize, triangulate
 from svv.domain.routines.c_sample import pick_from_tetrahedron, pick_from_triangle, pick_from_line
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from svv.domain.routines.boolean import boolean
 # from svtoolkit.tree.utils.KDTreeManager import KDTreeManager
 from svv.tree.utils.TreeManager import KDTreeManager, USearchTree
 from time import perf_counter
 from tqdm import trange, tqdm
-from sklearn.neighbors import BallTree
 import random
 
 
@@ -427,6 +426,8 @@ class Domain(object):
             self.C[i] = function.c
             self.D[i] = function.d
             self.PTS[i, :function.points.shape[0]] = function.pts
+        # Pre-compute normalize_scale for evaluate_fast
+        self._normalize_scale = np.linalg.norm(np.max(self.points, axis=0) - np.min(self.points, axis=0))
         # for fast evaluation
         report(0.55, "Fast evaluation structures assembled")
         if self.random_generator is None:
@@ -495,12 +496,27 @@ class Domain(object):
             raise ValueError("Domain not built.")
         if self.points.shape[1] != self.d:
             raise ValueError("Dimension mismatch.")
+        # Auto-chunk large inputs to cap peak memory from
+        # O(N * max_neighbors * max_pts_per_patch * d) intermediate arrays.
+        _CHUNK = 2000
+        if points.shape[0] > _CHUNK and not show:
+            values = np.empty((points.shape[0], 1))
+            for i0 in range(0, points.shape[0], _CHUNK):
+                i1 = min(i0 + _CHUNK, points.shape[0])
+                values[i0:i1] = self.evaluate_fast(
+                    points[i0:i1], k=k, normalize=normalize,
+                    tolerance=tolerance, show=show)
+            return values
         values = np.zeros((points.shape[0], 1))
         dists, indices_first = self.function_tree.query(points, k=1)
         dists_first = dists.reshape(-1, 1)[:, -1].flatten()
         indices = self.function_tree.query_ball_point(points, dists_first + tolerance * dists_first)
         if normalize:
-            normalize_scale = np.linalg.norm(np.max(self.points, axis=0) - np.min(self.points, axis=0))
+            # Use cached normalize_scale if available (pre-computed in build())
+            normalize_scale = getattr(self, '_normalize_scale', None)
+            if normalize_scale is None:
+                normalize_scale = np.linalg.norm(np.max(self.points, axis=0) - np.min(self.points, axis=0))
+                self._normalize_scale = normalize_scale
         else:
             normalize_scale = 1
         if show:
@@ -509,21 +525,24 @@ class Domain(object):
             print("Distances: ", dists)
             print("First Indices: ", indices_first)
             print("First Distances: ", dists_first)
-        indices_shape = np.array([len(indices[i]) for i in range(len(indices))])
-        inds = np.full((len(indices), indices_shape.max()), -1)
+        # Vectorized index array construction (replaces Python for loop)
+        indices_shape = np.array([len(idx) for idx in indices])
+        max_width = indices_shape.max() if len(indices_shape) > 0 else 1
+        inds = np.full((len(indices), max_width), -1, dtype=np.intp)
+        # Build ragged index array using vectorized filling
+        empty_mask = indices_shape == 0
+        if np.any(empty_mask):
+            inds[empty_mask, 0] = indices_first.ravel()[empty_mask]
+        non_empty = np.where(~empty_mask)[0]
+        if len(non_empty) > 0:
+            # Batch fill for rows with same length for efficiency
+            for length in np.unique(indices_shape[non_empty]):
+                rows = non_empty[indices_shape[non_empty] == length]
+                block = np.array([indices[r] for r in rows], dtype=np.intp)
+                inds[rows, :length] = block
         if show:
             print("Indices Shape: ", indices_shape)
             print("Inds Shape: ", inds.shape)
-        for i in range(len(indices)):
-            if len(indices[i]) == 0:
-                inds[i, 0] = indices_first[i]
-            else:
-                inds[i, :len(indices[i])] = indices[i]
-            #elif isinstance(indices_first[i], np.int64):
-            #    print("Fallback indices found for point {} -> {}".format(i, points[i, :]))
-            #    inds[i, 0] = indices_first[i]
-            #else:
-            #    print("No indices found for point {} -> {}".format(i, points[i, :]))
         inds_mask = np.ma.masked_array(inds, mask=(inds == -1))
         if np.any(np.all(inds_mask.mask, axis=1)):
             print("Mask for entire row! {}".format(np.argwhere(np.all(inds_mask.mask, axis=1))))
@@ -686,7 +705,9 @@ class Domain(object):
                 self.boundary = self.original_boundary.triangulate()
             else:
                 self.boundary = self.original_boundary
-            _, self.grid = contour(self.__call__, self.points, resolution)
+            # Skip the expensive contour() call — self.grid is not used downstream
+            # and contour() evaluates the implicit function at resolution³ points
+            self.grid = None
         self.boundary = self.boundary.connectivity(extraction_mode='largest')
         self.boundary = self.boundary.compute_cell_sizes()
         if self.points.shape[1] == 2:
@@ -741,25 +762,27 @@ class Domain(object):
             self.volume = _mesh.volume
         else:
             raise ValueError("Only 2D and 3D domains are supported.")
-        self.mesh_tree = cKDTree(_mesh.cell_centers().points[:, :self.points.shape[1]], leafsize=4)
-        self.mesh_tree_2 = BallTree(_mesh.cell_centers().points[:, :self.points.shape[1]])
+        cell_centers = _mesh.cell_centers().points[:, :self.points.shape[1]]
+        self.mesh_tree = cKDTree(cell_centers, leafsize=4)
+        # mesh_tree_2 kept as alias for backward compatibility
+        self.mesh_tree_2 = self.mesh_tree
         self.mesh = _mesh
         self.mesh_nodes = nodes.astype(np.float64)
         self.mesh_vertices = vertices.astype(np.int64)
+        # Use scipy ConvexHull instead of expensive pyvista delaunay_3d
         if self.points.shape[1] == 2:
-            delaunay = pv.PolyData()
-            tmp_points = np.zeros((self.points.shape[0], 3))
-            tmp_points[:, :2] = self.points
-            delaunay.points = tmp_points
-            delaunay = delaunay.delaunay_2d(offset=2*np.linalg.norm(np.max(self.points, axis=0) -
-                                                                    np.min(self.points, axis=0)))
-            self.convexity = self.mesh.area / delaunay.area
+            try:
+                hull = ConvexHull(self.points)
+                self.convexity = self.mesh.area / hull.volume  # In 2D, ConvexHull.volume is area
+            except Exception:
+                self.convexity = 1.0
         elif self.points.shape[1] == 3:
-            delaunay = pv.PolyData()
-            delaunay.points = np.unique(self.points, axis=0)
-            delaunay = delaunay.delaunay_3d(offset=2*np.linalg.norm(np.max(self.points, axis=0) -
-                                                                    np.min(self.points, axis=0)))
-            self.convexity = self.mesh.volume / delaunay.volume
+            try:
+                unique_pts = np.unique(self.points, axis=0)
+                hull = ConvexHull(unique_pts)
+                self.convexity = self.mesh.volume / hull.volume
+            except Exception:
+                self.convexity = 1.0
         else:
             raise ValueError("Only 2D and 3D domains are supported.")
         return _mesh
@@ -838,12 +861,12 @@ class Domain(object):
                             cells_outer = np.arange(self.mesh.n_cells, dtype=np.int64)
                         else:
                             #cells_0 = self.mesh_tree_2.query_radius(tree.active_tree.data, volume_threshold)
-                            cells_0 = self.mesh_tree_2.query_radius(tree, volume_threshold)
+                            cells_0 = self.mesh_tree.query_ball_point(tree, volume_threshold)
                             cells_outer = np.unique(np.concatenate(cells_0))
                         #_ = [cells_outer.extend(cell) for cell in cells_0]
                         #cells_1 = tree.query_ball_tree(self.mesh_tree, threshold, eps=threshold/100)
                         #cells_1 = self.mesh_tree_2.query_radius(tree.active_tree.data, threshold)
-                        cells_1 = self.mesh_tree_2.query_radius(tree, threshold)
+                        cells_1 = self.mesh_tree.query_ball_point(tree, threshold)
                         #cells_inner = []
                         #_ = [cells_inner.extend(cell) for cell in cells_1]
                         cells_inner = np.unique(np.concatenate(cells_1))

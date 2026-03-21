@@ -179,17 +179,9 @@ class TreeConnection:
         tree_1 = 1
         tree_connections = []
         midpoints = []
-        self.vessels = []
-        self.lengths = []
-        self.vessels.append([])
-        self.vessels.append([])
-        self.lengths.append([])
-        self.lengths.append([])
-        #print("Network copy")
-        #self.connected_network = deepcopy(self.network)
-        #print("Network copy complete")
+        self.vessels = [[], []]
+        self.lengths = [[], []]
         for j in trange(len(self.ctrlpts_functions[0]), desc=f"Tree {tree_0} to Tree {tree_1}", leave=True):
-            print(f"setup vessel connection: {j}")
             idx_a = self.assignments[tree_0][j]
             idx_b = self.assignments[tree_1][j]
             v0 = self.forest.networks[self.network_id][tree_0].data[idx_a, :]
@@ -211,21 +203,18 @@ class TreeConnection:
                                     ctrl_function=self.ctrlpts_functions[0][j],
                                     clamp_first=True, clamp_second=True, curve_type=self.curve_type,
                                     collision_vessels=collision_vessels)
-            print(f"setup vessel connection finished")
             if self._collision_cache is None:
                 collisions = []
-                collisions.append(conn.connection.other_line_segments)
-                if len(self.vessels) > 0:
-                    for i in range(len(self.vessels)):
-                        if len(self.vessels[i]) > 0:
-                            collisions.extend(self.vessels[i])
-                if len(self.other_vessels) > 0:
-                    for i in range(len(self.other_vessels)):
-                        if len(self.other_vessels[i]) > 0:
-                            collisions.extend(self.other_vessels[i])
-                if len(collisions) > 0:
-                    collisions = np.vstack(collisions)
-                    conn.connection.set_collision_vessels(collisions)
+                if hasattr(conn.connection, 'other_line_segments') and len(conn.connection.other_line_segments) > 0:
+                    collisions.append(conn.connection.other_line_segments)
+                for vessel_list in self.vessels:
+                    if vessel_list:
+                        collisions.extend(vessel_list)
+                for other_list in self.other_vessels:
+                    if other_list:
+                        collisions.extend(other_list)
+                if collisions:
+                    conn.connection.set_collision_vessels(np.vstack(collisions))
             index_0 = self.assignments[tree_0][j]
             index_1 = self.assignments[tree_1][j]
             degree = args[0]

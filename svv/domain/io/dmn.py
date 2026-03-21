@@ -403,11 +403,8 @@ def read_dmn(path: Union[str, os.PathLike]):
             # Build spatial index for cell lookups
             cell_centers = dom.mesh.cell_centers().points[:, :points.shape[1]]
             dom.mesh_tree = cKDTree(cell_centers, leafsize=4)
-            try:
-                from sklearn.neighbors import BallTree
-                dom.mesh_tree_2 = BallTree(cell_centers)
-            except Exception:  # pragma: no cover
-                dom.mesh_tree_2 = None
+            # Reuse cKDTree for radius queries instead of building a separate BallTree
+            dom.mesh_tree_2 = dom.mesh_tree
             # Use numpy array instead of list for efficiency
             dom.all_mesh_cells = np.arange(n_cells, dtype=np.int64)
             dom.cumulative_probability = np.cumsum(dom.mesh.cell_data['Normalized_Area'])
@@ -433,11 +430,8 @@ def read_dmn(path: Union[str, os.PathLike]):
             # Build spatial index for cell lookups
             cell_centers = dom.mesh.cell_centers().points[:, :points.shape[1]]
             dom.mesh_tree = cKDTree(cell_centers, leafsize=4)
-            try:
-                from sklearn.neighbors import BallTree
-                dom.mesh_tree_2 = BallTree(cell_centers)
-            except Exception:  # pragma: no cover
-                dom.mesh_tree_2 = None
+            # Reuse cKDTree for radius queries instead of building a separate BallTree
+            dom.mesh_tree_2 = dom.mesh_tree
             # Use numpy array instead of list for efficiency
             dom.all_mesh_cells = np.arange(n_cells, dtype=np.int64)
             dom.cumulative_probability = np.cumsum(dom.mesh.cell_data['Normalized_Volume'])
