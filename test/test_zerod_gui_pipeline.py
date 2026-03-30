@@ -1,5 +1,6 @@
 import pytest
 import sys
+import types
 
 pytest.importorskip("PySide6")
 
@@ -33,6 +34,65 @@ def test_build_0d_pipeline_steps_disable_gui_unfriendly_outputs(monkeypatch, tmp
     assert steps[0].args[-1].endswith("run.py")
     assert steps[1].env["SVV_0D_RENDER_SCREENSHOTS"] == "0"
     assert steps[1].env["SVV_0D_DISABLE_TQDM"] == "1"
+
+    _close_gui(app, gui)
+
+
+def test_gui_exposes_constrained_tissue_mesh_action(monkeypatch):
+    app, gui = _make_gui(monkeypatch)
+
+    assert gui.build_constrained_tissue_mesh_action.text() == "Build Constrained Tissue Mesh..."
+
+    _close_gui(app, gui)
+
+
+def test_build_constrained_tissue_mesh_uses_spline_point_constrained_mode(monkeypatch):
+    app, gui = _make_gui(monkeypatch)
+    built = {}
+    import svv.simulation.simulation as simulation_mod
+
+    class _FakeSurface:
+        n_points = 4
+
+    class _FakeVolumeMesh:
+        n_cells = 12
+
+        def extract_surface(self):
+            return _FakeSurface()
+
+    class _FakeSimulation:
+        def __init__(self, obj):
+            built["obj"] = obj
+            self.tissue_domain_volume_meshes = [_FakeVolumeMesh()]
+            self.tissue_constraint_metadata = [{"source": "fake"}]
+
+        def build_meshes(self, **kwargs):
+            built["kwargs"] = kwargs
+
+    fake_obj = types.SimpleNamespace(domain=types.SimpleNamespace(boundary=object()))
+
+    monkeypatch.setattr(gui, "_show_constrained_tissue_mesh_preview", lambda surfaces: built.setdefault("surfaces", list(surfaces)))
+    monkeypatch.setattr(simulation_mod, "Simulation", _FakeSimulation)
+
+    sim, volume_meshes, surfaces = gui._build_constrained_tissue_mesh(
+        fake_obj,
+        spline_sample_points=77,
+        tolerance=1e-5,
+        show_overlay=True,
+    )
+
+    assert isinstance(sim, _FakeSimulation)
+    assert built["obj"] is fake_obj
+    assert built["kwargs"] == {
+        "fluid": False,
+        "tissue": True,
+        "tissue_mesh_type": "spline_point_constrained",
+        "tissue_constraint_spline_sample_points": 77,
+        "tissue_constraint_tolerance": 1e-05,
+    }
+    assert len(volume_meshes) == 1
+    assert len(surfaces) == 1
+    assert built["surfaces"] == surfaces
 
     _close_gui(app, gui)
 

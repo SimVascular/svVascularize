@@ -15,7 +15,7 @@ from svv.visualize.tree.show import show
 from svv.tree.branch.bifurcation import add_vessel, check_tree
 from svv.tree.export.export_solid import build_watertight_solid, build_merged_solid
 from svv.tree.export.export_centerlines import build_centerlines
-from svv.tree.export.write_splines import get_interpolated_sv_data, write_splines
+from svv.tree.export.write_splines import get_interpolated_sv_data, write_splines as write_tree_splines
 from svv.tree.utils.TreeManager import KDTreeManager, USearchTree
 from svv.tree.utils.c_extend import build_c_vessel_map
 from collections import ChainMap
@@ -597,7 +597,12 @@ class Tree(object):
     def export_gcode(self):
         pass
 
-    def export_splines(self, spline_sample_points=100):
+    def export_splines(self, spline_sample_points=100, write_splines=True, outdir=None):
         interp_xyz, interp_r, interp_n, path_frames, branches, interp_xyzr = get_interpolated_sv_data(self.data)
-        splines = write_splines(interp_xyzr, spline_sample_points=spline_sample_points)
+        splines = write_tree_splines(
+            interp_xyzr,
+            spline_sample_points=spline_sample_points,
+            write_splines=write_splines,
+            outdir=outdir,
+        )
         return splines

@@ -39,8 +39,10 @@ def read(data, **kwargs):
 
     data = data.compute_normals(split_vertices=True, feature_angle=feature_angle)
 
-    points = data.points.astype(numpy.float64)
-    normals = data.point_normals.astype(numpy.float64)
+    # Materialize base NumPy arrays here so downstream allocation does not pay
+    # pyvista_ndarray adapter overhead on every slice/index operation.
+    points = numpy.array(data.points, dtype=numpy.float64, copy=True)
+    normals = numpy.array(data.point_normals, dtype=numpy.float64, copy=True)
     n = points.shape[0]
     d = points.shape[1]
     return points, normals, n, d

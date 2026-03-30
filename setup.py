@@ -24,6 +24,7 @@ import re
 import inspect
 from pathlib import Path
 import multiprocessing
+from textwrap import dedent
 
 num_cores = multiprocessing.cpu_count() // 2
 
@@ -386,6 +387,213 @@ def _copy_windows_runtime_dlls(executable_path, destination_dir):
     return copied
 
 
+def _tetgen_os_dir() -> str:
+    sysname = platform.system()
+    if sysname == "Linux":
+        return "Linux"
+    if sysname == "Windows":
+        return "Windows"
+    if sysname == "Darwin":
+        return "Mac"
+    raise RuntimeError(f"Unsupported OS for TetGen CLI packaging: {sysname}")
+
+
+def _tetgen_arch_dir(os_dir: str) -> str:
+    override = os.environ.get("SVV_TETGEN_ARCH", "").strip()
+    if override:
+        ov = override.lower()
+        if ov in {"x86_64", "amd64"}:
+            return "x86_64"
+        if ov in {"aarch64", "arm64"}:
+            return "aarch64"
+        if ov == "universal2":
+            return "universal2"
+        return override
+
+    if os_dir == "Mac":
+        repo_root = Path(__file__).resolve().parent
+        exe_name = _tetgen_expected_filenames(os_dir, "universal2")[0]
+        uni_dir = repo_root / "svv" / "utils" / "meshing" / "Mac" / "universal2"
+        if (uni_dir / exe_name).is_file():
+            return "universal2"
+
+    machine = platform.machine().strip().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64"
+    if machine in {"aarch64", "arm64"}:
+        return "aarch64"
+    return machine or "unknown"
+
+
+def _tetgen_expected_filenames(os_dir: str, arch_dir: str) -> list:
+    del arch_dir
+    name = "tetgen"
+    if os_dir == "Windows":
+        name += ".exe"
+    return [name]
+
+
+def _find_tetgen_cli_source_dir(source_extract_root: str) -> str:
+    root = Path(source_extract_root).resolve()
+    candidates = [root]
+    if root.is_dir():
+        candidates.extend(sorted(path for path in root.iterdir() if path.is_dir()))
+
+    for candidate in candidates:
+        src_dir = candidate / "src"
+        if (src_dir / "tetgen.cxx").is_file() and (src_dir / "predicates.cxx").is_file():
+            return str(candidate)
+
+    for tetgen_src in root.rglob("tetgen.cxx"):
+        src_dir = tetgen_src.parent
+        if src_dir.name == "src" and (src_dir / "predicates.cxx").is_file():
+            return str(src_dir.parent)
+
+    raise RuntimeError(
+        f"Could not locate TetGen CLI sources under {root}. Expected src/tetgen.cxx and src/predicates.cxx."
+    )
+
+
+def _write_tetgen_cli_cmakelists(cmake_path: str) -> None:
+    Path(cmake_path).write_text(
+        dedent(
+            """
+            cmake_minimum_required(VERSION 3.16)
+            project(svv_tetgen_cli LANGUAGES CXX)
+
+            if(NOT DEFINED TETGEN_SOURCE_DIR)
+              message(FATAL_ERROR "TETGEN_SOURCE_DIR must be set")
+            endif()
+
+            set(CMAKE_CXX_STANDARD 11)
+            set(CMAKE_CXX_STANDARD_REQUIRED ON)
+            set(CMAKE_CXX_EXTENSIONS OFF)
+
+            add_executable(tetgen
+              "${TETGEN_SOURCE_DIR}/src/tetgen.cxx"
+              "${TETGEN_SOURCE_DIR}/src/predicates.cxx"
+            )
+            target_include_directories(tetgen PRIVATE "${TETGEN_SOURCE_DIR}/src")
+
+            if(MSVC)
+              target_compile_definitions(tetgen PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+            endif()
+
+            install(TARGETS tetgen RUNTIME DESTINATION .)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def build_tetgen_cli(num_cores=None):
+    if num_cores is None:
+        num_cores = os.cpu_count() or 1
+
+    if shutil.which("cmake") is None:
+        raise RuntimeError("CMake is not installed or not on the PATH.")
+
+    download_url_tetgen = os.environ.get(
+        "SVV_TETGEN_CLI_URL",
+        "https://github.com/pyvista/tetgen/archive/refs/tags/v0.8.3.tar.gz",
+    )
+    tarball_path_tetgen = "tetgen-cli.tar.gz"
+    source_extract_root = os.path.abspath("tetgen-cli-src")
+    build_dir_tetgen = os.path.abspath(os.path.join("bin", "tetgen-cli"))
+    wrapper_dir_tetgen = os.path.abspath(os.path.join("bin", "tetgen-cli-wrapper"))
+
+    try:
+        if not os.path.exists(tarball_path_tetgen):
+            print(f"Downloading {download_url_tetgen}...")
+            urlretrieve(download_url_tetgen, tarball_path_tetgen)
+    except Exception as e:
+        raise RuntimeError("Error downloading TetGen CLI archive.") from e
+
+    try:
+        if not os.path.exists(source_extract_root):
+            os.makedirs(source_extract_root, exist_ok=True)
+            with tarfile.open(tarball_path_tetgen, "r:gz") as t:
+                _tar_safe_extract(t, source_extract_root)
+    except Exception as e:
+        raise RuntimeError("Error extracting TetGen CLI archive.") from e
+
+    tetgen_source_dir = _find_tetgen_cli_source_dir(source_extract_root)
+
+    if os.path.isdir(build_dir_tetgen):
+        shutil.rmtree(build_dir_tetgen, ignore_errors=True)
+    if os.path.isdir(wrapper_dir_tetgen):
+        shutil.rmtree(wrapper_dir_tetgen, ignore_errors=True)
+    os.makedirs(build_dir_tetgen, exist_ok=True)
+    os.makedirs(wrapper_dir_tetgen, exist_ok=True)
+    _write_tetgen_cli_cmakelists(os.path.join(wrapper_dir_tetgen, "CMakeLists.txt"))
+
+    cmake_cmd = ["cmake", "-Wno-dev", "-Wno-deprecated"]
+    if platform.system().lower().startswith("win"):
+        vs_generator = pick_visual_studio_generator()
+        if vs_generator:
+            cmake_cmd += ["-G", vs_generator]
+        else:
+            print("No suitable Visual Studio found, falling back to default generator or NMake.")
+
+    cmake_cmd += [
+        "-DCMAKE_BUILD_TYPE=Release",
+        f"-DTETGEN_SOURCE_DIR={tetgen_source_dir}",
+        "-B", build_dir_tetgen,
+        "-S", wrapper_dir_tetgen,
+    ]
+    print("Configuring TetGen CLI with CMake:", " ".join(cmake_cmd))
+    try:
+        subprocess.check_call(cmake_cmd)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("CMake configure failed for TetGen CLI.") from e
+
+    build_cmd = [
+        "cmake",
+        "--build", build_dir_tetgen,
+        "--parallel", str(num_cores),
+    ]
+    if platform.system().lower().startswith("win"):
+        build_cmd += ["--config", "Release"]
+    print("Building TetGen CLI with CMake:", " ".join(build_cmd))
+    try:
+        subprocess.check_call(build_cmd)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("CMake build failed for TetGen CLI.") from e
+
+    os_dir = _tetgen_os_dir()
+    arch_dir = _tetgen_arch_dir(os_dir)
+    install_prefix = os.path.abspath(os.path.join("svv", "utils", "meshing", os_dir, arch_dir))
+    os.makedirs(install_prefix, exist_ok=True)
+    install_cmd = [
+        "cmake",
+        "--install", build_dir_tetgen,
+        "--prefix", install_prefix,
+    ]
+    if platform.system().lower().startswith("win"):
+        install_cmd += ["--config", "Release"]
+    print("Installing TetGen CLI with CMake:", " ".join(install_cmd))
+    subprocess.check_call(install_cmd)
+
+    expected_name = _tetgen_expected_filenames(os_dir, arch_dir)[0]
+    exe_path = Path(install_prefix) / expected_name
+    if not exe_path.is_file():
+        raise RuntimeError(
+            "TetGen CLI build completed, but the staged executable was not found at "
+            f"{exe_path}."
+        )
+    if os_dir != "Windows":
+        exe_path.chmod(exe_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    print(f"TetGen CLI staged at: {exe_path}")
+    print("Remove Source, Archive, and Build directories")
+    if os.path.isfile(tarball_path_tetgen):
+        os.remove(tarball_path_tetgen)
+    remove_directory_tree(build_dir_tetgen)
+    remove_directory_tree(wrapper_dir_tetgen)
+    remove_directory_tree(source_extract_root)
+
+
 def build_0d(num_cores=None):
     if num_cores is None:
         num_cores = os.cpu_count() or 1
@@ -562,12 +770,17 @@ class DownloadAndBuildExt(build_ext):
         (
             "build-native-binaries",
             None,
-            "build and stage MMG + svZeroDSolver executables for this platform",
+            "build and stage MMG + TetGen CLI + svZeroDSolver executables for this platform",
         ),
         (
             "build-mmg",
             None,
             "build and stage MMG executables for this platform",
+        ),
+        (
+            "build-tetgen-cli",
+            None,
+            "build and stage TetGen CLI executable for this platform",
         ),
         (
             "build-solver-0d",
@@ -578,6 +791,7 @@ class DownloadAndBuildExt(build_ext):
     boolean_options = build_ext.boolean_options + [
         "build-native-binaries",
         "build-mmg",
+        "build-tetgen-cli",
         "build-solver-0d",
     ]
 
@@ -585,6 +799,7 @@ class DownloadAndBuildExt(build_ext):
         super().initialize_options()
         self.build_native_binaries = False
         self.build_mmg = False
+        self.build_tetgen_cli = False
         self.build_solver_0d = False
 
     def run(self):
@@ -594,6 +809,11 @@ class DownloadAndBuildExt(build_ext):
             or bool(self.build_native_binaries)
             or bool(self.build_mmg)
         )
+        build_tetgen_cli_flag = (
+            env_flag("SVV_BUILD_TETGEN_CLI", False)
+            or bool(self.build_native_binaries)
+            or bool(self.build_tetgen_cli)
+        )
         build_0d_flag = (
             env_flag("SVV_BUILD_SOLVER_0D", False)
             or env_flag("SVV_BUILD_SOLVERS", False)
@@ -602,11 +822,13 @@ class DownloadAndBuildExt(build_ext):
         )
 
         if self.build_native_binaries:
-            print("Building native binaries: MMG + svZeroDSolver")
-        elif self.build_mmg or self.build_solver_0d:
+            print("Building native binaries: MMG + TetGen CLI + svZeroDSolver")
+        elif self.build_mmg or self.build_tetgen_cli or self.build_solver_0d:
             selected = []
             if self.build_mmg:
                 selected.append("MMG")
+            if self.build_tetgen_cli:
+                selected.append("TetGen CLI")
             if self.build_solver_0d:
                 selected.append("svZeroDSolver")
             print("Building native binaries:", " + ".join(selected))
@@ -616,6 +838,12 @@ class DownloadAndBuildExt(build_ext):
                 build_mmg(num_cores=num_cores)
             except Exception as e:
                 print(f"Warning: MMG build failed ({e}). Continuing without building MMG.")
+
+        if build_tetgen_cli_flag:
+            try:
+                build_tetgen_cli(num_cores=num_cores)
+            except Exception as e:
+                print(f"Warning: TetGen CLI build failed ({e}). Continuing without building TetGen CLI.")
 
         if build_0d_flag:
             try:
@@ -806,6 +1034,7 @@ def _mmg_expected_filenames(os_dir: str, arch_dir: str) -> list:
     return names
 
 
+
 def _mmg_package_patterns() -> list:
     if ACCEL_COMPANION:
         return []
@@ -820,6 +1049,26 @@ def _mmg_package_patterns() -> list:
         if missing:
             raise RuntimeError(
                 "MMG executables missing for this build. "
+                f"Expected in {base}:\n  - " + "\n  - ".join(missing)
+            )
+
+    return [f"{os_dir}/{arch_dir}/*"]
+
+
+def _tetgen_package_patterns() -> list:
+    if ACCEL_COMPANION:
+        return []
+
+    os_dir = _tetgen_os_dir()
+    arch_dir = _tetgen_arch_dir(os_dir)
+
+    if env_flag("SVV_REQUIRE_TETGEN_CLI", False):
+        repo_root = Path(__file__).resolve().parent
+        base = repo_root / "svv" / "utils" / "meshing" / os_dir / arch_dir
+        missing = [n for n in _tetgen_expected_filenames(os_dir, arch_dir) if not (base / n).is_file()]
+        if missing:
+            raise RuntimeError(
+                "TetGen CLI executable missing for this build. "
                 f"Expected in {base}:\n  - " + "\n  - ".join(missing)
             )
 
@@ -924,6 +1173,7 @@ setup_info = dict(
                 'icons/*.svg',
             ],
             'svv.utils.remeshing': _mmg_package_patterns(),
+            'svv.utils.meshing': _tetgen_package_patterns(),
             'svv.utils.solvers': _solver_0d_package_patterns(),
         }
         if not ACCEL_COMPANION

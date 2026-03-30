@@ -23,6 +23,8 @@ from svv.simulation.mesh import GeneralMesh
 from svv.simulation.fluid.fluid_equation import FluidEquation
 from svv.simulation.utils.boundary_layer import BoundaryLayer
 from svv.domain.routines.tetrahedralize import tetrahedralize
+from svv.domain.routines.tetgen_constrained import tetrahedralize_with_prescribed_points
+from svv.simulation.utils.spline_constraints import deduplicate_spline_constraints, sample_spline_functions
 
 # Defer 1D/0D ROM imports to their respective methods to avoid importing
 # vtk-heavy modules during Simulation class import.
@@ -53,6 +55,7 @@ class Simulation(object):
         self.fluid_domain_boundary_layers = []
         self.fluid_domain_interiors = []
         self.fluid_domain_wall_layers = []
+        self.tissue_constraint_metadata = []
         if isinstance(self.synthetic_object, svv.tree.tree.Tree):
             self.fluid_3d_simulations = [None]
             self.fluid_1d_simulations = [None]
@@ -84,10 +87,126 @@ class Simulation(object):
             resolved_folder = target.name or default_folder
         return resolved_outdir, resolved_folder, os.path.join(resolved_outdir, resolved_folder)
 
+    @staticmethod
+    def _uses_spline_point_constraints(tissue_mesh_type):
+        mesh_type = str(tissue_mesh_type).strip().lower()
+        return mesh_type in {"spline_point_constrained", "centerline_point_constrained"}
+
+    def _remesh_tissue_boundary(self, boundary, **kwargs):
+        remesh_kwargs = dict(kwargs)
+        remesh_kwargs.setdefault("verbosity", 0)
+        try:
+            return remesh_surface(boundary, **remesh_kwargs)
+        except Exception:
+            fix = pymeshfix.MeshFix(boundary)
+            fix.repair()
+            return remesh_surface(fix.mesh, **remesh_kwargs)
+
+    @staticmethod
+    def _boundary_is_manifold(boundary):
+        try:
+            return bool(boundary.is_manifold)
+        except Exception:
+            return False
+
+    def _prepare_constrained_tissue_boundary(self, boundary, **kwargs):
+        if self._boundary_is_manifold(boundary):
+            return boundary.copy(deep=True)
+        return self._remesh_tissue_boundary(boundary, **kwargs)
+
+    def _collect_tissue_spline_constraints(self, *, tree=None, tissue_constraint_points=None,
+                                           tissue_constraint_lines=None,
+                                           tissue_constraint_spline_sample_points=100,
+                                           tissue_constraint_tolerance=1e-6):
+        if tissue_constraint_points is not None:
+            sampled = {
+                "points": numpy.asarray(tissue_constraint_points, dtype=float).reshape(-1, 3),
+                "lines": (
+                    numpy.empty((0, 2), dtype=numpy.int64)
+                    if tissue_constraint_lines is None
+                    else numpy.asarray(tissue_constraint_lines, dtype=numpy.int64).reshape(-1, 2)
+                ),
+            }
+            sampled["spline_id"] = numpy.full(sampled["points"].shape[0], -1, dtype=numpy.int32)
+            sampled["spline_order"] = numpy.arange(sampled["points"].shape[0], dtype=numpy.int32)
+            sampled["radius"] = numpy.full(sampled["points"].shape[0], numpy.nan, dtype=float)
+        else:
+            if tree is not None:
+                splines = tree.export_splines(
+                    spline_sample_points=tissue_constraint_spline_sample_points,
+                    write_splines=False,
+                )
+            elif isinstance(self.synthetic_object, svv.tree.tree.Tree):
+                splines = self.synthetic_object.export_splines(
+                    spline_sample_points=tissue_constraint_spline_sample_points,
+                    write_splines=False,
+                )
+            elif isinstance(self.synthetic_object, svv.forest.forest.Forest) and not isinstance(self.synthetic_object.connections, type(None)):
+                splines = self.synthetic_object.export_splines(
+                    spline_sample_points=tissue_constraint_spline_sample_points,
+                    write_splines=False,
+                )
+            else:
+                raise ValueError(
+                    "Automatic spline constraint collection requires a tree or connected forest object."
+                )
+            sampled = sample_spline_functions(
+                splines,
+                spline_sample_points=tissue_constraint_spline_sample_points,
+            )
+
+        return deduplicate_spline_constraints(
+            sampled["points"],
+            lines=sampled.get("lines"),
+            spline_id=sampled.get("spline_id"),
+            spline_order=sampled.get("spline_order"),
+            radius=sampled.get("radius"),
+            tol=max(float(tissue_constraint_tolerance), 0.0),
+        )
+
+    def _build_constrained_tissue_volume_mesh(self, tissue_domain, *, constraint_data, minratio=1.1,
+                                              mindihedral=10.0, order=1,
+                                              tissue_constraint_tolerance=1e-6, tetgen_exe=None):
+        if constraint_data is None or constraint_data["points"].shape[0] == 0:
+            raise ValueError("Spline-point-constrained tissue meshing requires at least one prescribed point.")
+
+        point_metadata = {
+            "spline_id": constraint_data["spline_id"],
+            "spline_order": constraint_data["spline_order"],
+            "radius": constraint_data["radius"],
+        }
+
+        def _mesh(surface_mesh):
+            return tetrahedralize_with_prescribed_points(
+                surface_mesh,
+                constraint_data["points"],
+                prescribed_lines=constraint_data["lines"],
+                minratio=minratio,
+                mindihedral=mindihedral,
+                order=order,
+                verify_tol=tissue_constraint_tolerance,
+                tetgen_exe=tetgen_exe,
+                point_metadata=point_metadata,
+            )
+
+        try:
+            return _mesh(tissue_domain)
+        except Exception as exc:
+            if "TetGen executable not found" in str(exc):
+                raise
+            if self._boundary_is_manifold(tissue_domain):
+                raise
+            fix = pymeshfix.MeshFix(tissue_domain)
+            fix.repair()
+            return _mesh(fix.mesh)
+
     def build_meshes(self, fluid=True, tissue=False, hausd=0.0001, hsize=None, minratio=1.1, mindihedral=10.0,
                      order=1, remesh_vol=False, boundary_layer=True, layer_thickness_ratio=0.25,
                      layer_thickness_ratio_adjustment=0.5, boundary_layer_attempts=5, wall_layers=False,
-                     wall_thickness=None, upper_num_triangles=1000, lower_num_triangles=100):
+                     wall_thickness=None, upper_num_triangles=1000, lower_num_triangles=100,
+                     tissue_mesh_type="standard", tissue_constraint_points=None, tissue_constraint_lines=None,
+                     tissue_constraint_spline_sample_points=100, tissue_constraint_tolerance=1e-6,
+                     tetgen_exe=None):
         """
         Build the mesh objects for 3D simulations.
         :return:
@@ -102,9 +221,11 @@ class Simulation(object):
         self.fluid_domain_boundary_layers = []
         self.fluid_domain_interiors = []
         self.fluid_domain_wall_layers = []
+        self.tissue_constraint_metadata = []
+        uses_spline_constraints = self._uses_spline_point_constraints(tissue_mesh_type)
         if isinstance(self.synthetic_object, svv.tree.tree.Tree):
             if fluid:
-                if tissue:
+                if tissue and not uses_spline_constraints:
                     extension_scale = 4.0
                     for i in range(5):
                         new_root = self.synthetic_object.data[0, 0:3] + extension_scale * self.synthetic_object.data[0, 21]*self.synthetic_object.data.get('w_basis', 0)
@@ -195,63 +316,89 @@ class Simulation(object):
                     fluid_surface_mesh.cell_data["hsize"][0] = hsize
                     self.fluid_domain_surface_meshes.append(fluid_surface_mesh)
                     self.fluid_domain_volume_meshes.append(fluid_volume_mesh)
-                    if tissue:
+                    if tissue and not uses_spline_constraints:
                         self.synthetic_object.data[0, 0:3] += root_extension * self.synthetic_object.data.get('w_basis',0)
             if tissue and not isinstance(self.synthetic_object.domain, type(None)):
-                # Extrude the root of the tree to ensure proper intersection with the tissue domain.
-                if not fluid:
-                    root_extension = max(self.synthetic_object.data[0, 21] * 4, self.synthetic_object.data[0, 20] * 0.5)
-                    self.synthetic_object.data[0, 0:3] += root_extension * self.synthetic_object.data.get('w_basis', 0)
-                    # Should check to see that the extended point does not intersect with another fluid or tissue domain.
-                    fluid_surface_boolean_mesh = self.synthetic_object.export_solid(watertight=True)
+                if uses_spline_constraints:
+                    tissue_domain = self._prepare_constrained_tissue_boundary(
+                        self.synthetic_object.domain.boundary,
+                        hausd=hausd,
+                    )
                 else:
-                    if not wall_layers:
-                        fluid_surface_boolean_mesh = deepcopy(self.fluid_domain_surface_meshes[-1])
+                    # Extrude the root of the tree to ensure proper intersection with the tissue domain.
+                    if not fluid:
+                        root_extension = max(self.synthetic_object.data[0, 21] * 4, self.synthetic_object.data[0, 20] * 0.5)
+                        self.synthetic_object.data[0, 0:3] += root_extension * self.synthetic_object.data.get('w_basis', 0)
+                        # Should check to see that the extended point does not intersect with another fluid or tissue domain.
+                        fluid_surface_boolean_mesh = self.synthetic_object.export_solid(watertight=True)
                     else:
-                        fluid_surface_boolean_mesh = deepcopy(self.fluid_domain_wall_layers[-1])
-                hsize = fluid_surface_boolean_mesh.cell_data["hsize"][0]
-                try:
-                    tissue_domain = remesh_surface(self.synthetic_object.domain.boundary, hausd=hausd, verbosity=0) # Check if this should be remeshed
-                except:
-                    print("REMESHING FAILS: CHECKING FOR TRIANGLE INTERSECTIONS")
-                    tmp_boundary = pymeshfix.MeshFix(self.synthetic_object.domain.boundary)
-                area = tissue_domain.area
-                tissue_domain = boolean(tissue_domain, fluid_surface_boolean_mesh, operation='difference')
-                if fluid:
-                    fluid_faces = extract_faces(tissue_domain, None)
-                    face_sizes = [len(face) for face in fluid_faces[0]]
-                    wall = numpy.argmax(face_sizes)
-                    low_tri_area = area / upper_num_triangles
-                    hmin = ((4.0*low_tri_area)/3.0**0.5) ** (0.5)
-                    upper_tri_area = area / lower_num_triangles
-                    hmax = ((4.0*upper_tri_area)/3.0**0.5) ** (0.5)
-                    tissue_domain = remesh_surface(tissue_domain, hausd=hausd, verbosity=0)
-                else:
-                    tissue_domain = remesh_surface(tissue_domain, hausd=hausd, verbosity=0)
-                #tet_tissue = tetgen.TetGen(tissue_domain)
-                if not fluid:
-                    self.synthetic_object.data[0, 0:3] += root_extension * self.synthetic_object.data.get('w_basis', 0)
-                try:
-                    grid, nodes, elems = tetrahedralize(switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
-                    #tet_tissue.tetrahedralize(minratio=minratio, order=order)
-                    tissue_volume_mesh = grid
-                except:
+                        if not wall_layers:
+                            fluid_surface_boolean_mesh = deepcopy(self.fluid_domain_surface_meshes[-1])
+                        else:
+                            fluid_surface_boolean_mesh = deepcopy(self.fluid_domain_wall_layers[-1])
+                    hsize = fluid_surface_boolean_mesh.cell_data["hsize"][0]
+                    tissue_domain = self._remesh_tissue_boundary(
+                        self.synthetic_object.domain.boundary,
+                        hausd=hausd,
+                    )
+                    area = tissue_domain.area
+                    tissue_domain = boolean(tissue_domain, fluid_surface_boolean_mesh, operation='difference')
                     if fluid:
-                        print('Mesh interface may be corrupted after mesh fixing for tetrahedralization.')
-                    fix = pymeshfix.MeshFix(tissue_domain)
-                    fix.repair()
-                    #tet_tissue.make_manifold(verbose=True)
-                    #tet_tissue.tetrahedralize(minratio=minratio, order=order)
-                    grid, nodes, elems = tetrahedralize(fix.mesh, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                        fluid_faces = extract_faces(tissue_domain, None)
+                        face_sizes = [len(face) for face in fluid_faces[0]]
+                        wall = numpy.argmax(face_sizes)
+                        low_tri_area = area / upper_num_triangles
+                        hmin = ((4.0*low_tri_area)/3.0**0.5) ** (0.5)
+                        upper_tri_area = area / lower_num_triangles
+                        hmax = ((4.0*upper_tri_area)/3.0**0.5) ** (0.5)
+                        tissue_domain = self._remesh_tissue_boundary(tissue_domain, hausd=hausd)
+                    else:
+                        tissue_domain = self._remesh_tissue_boundary(tissue_domain, hausd=hausd)
+                    #tet_tissue = tetgen.TetGen(tissue_domain)
+                    if not fluid:
+                        self.synthetic_object.data[0, 0:3] += root_extension * self.synthetic_object.data.get('w_basis', 0)
+                if self._uses_spline_point_constraints(tissue_mesh_type):
+                    constraint_data = self._collect_tissue_spline_constraints(
+                        tissue_constraint_points=tissue_constraint_points,
+                        tissue_constraint_lines=tissue_constraint_lines,
+                        tissue_constraint_spline_sample_points=tissue_constraint_spline_sample_points,
+                        tissue_constraint_tolerance=tissue_constraint_tolerance,
+                    )
+                    grid, nodes, elems, constraint_meta = self._build_constrained_tissue_volume_mesh(
+                        tissue_domain,
+                        constraint_data=constraint_data,
+                        minratio=minratio,
+                        mindihedral=mindihedral,
+                        order=order,
+                        tissue_constraint_tolerance=tissue_constraint_tolerance,
+                        tetgen_exe=tetgen_exe,
+                    )
                     tissue_volume_mesh = grid
+                else:
+                    constraint_meta = None
+                    try:
+                        grid, nodes, elems = tetrahedralize(tissue_domain, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                        #tet_tissue.tetrahedralize(minratio=minratio, order=order)
+                        tissue_volume_mesh = grid
+                    except:
+                        if fluid:
+                            print('Mesh interface may be corrupted after mesh fixing for tetrahedralization.')
+                        fix = pymeshfix.MeshFix(tissue_domain)
+                        fix.repair()
+                        #tet_tissue.make_manifold(verbose=True)
+                        #tet_tissue.tetrahedralize(minratio=minratio, order=order)
+                        grid, nodes, elems = tetrahedralize(fix.mesh, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                        tissue_volume_mesh = grid
                 if isinstance(tissue_volume_mesh, type(None)):
                     print("Failed to generate tissue volume mesh.")
+                    self.tissue_constraint_metadata.append(None)
                 else:
                     if remesh_vol:
                         tissue_volume_mesh = remesh_volume(tissue_volume_mesh, hausd=hausd, nosurf=True)
                     tissue_domain = tissue_volume_mesh.extract_surface()
                     self.tissue_domain_surface_meshes.append(tissue_domain)
                     self.tissue_domain_volume_meshes.append(tissue_volume_mesh)
+                    self.tissue_constraint_metadata.append(constraint_meta)
         elif isinstance(self.synthetic_object, svv.forest.forest.Forest) and isinstance(self.synthetic_object.connections, type(None)):
             for network in self.synthetic_object.networks:
                 network_fluid_surface_meshes = []
@@ -286,51 +433,82 @@ class Simulation(object):
                             network_fluid_surface_meshes.append(fluid_surface_mesh)
                             network_fluid_volume_meshes.append(fluid_volume_mesh)
                     if tissue:
-                        # Extrude the root of the tree to ensure proper intersection with the tissue domain.
-                        root_extension = max(tree.data[0, 21] * 4, tree.data[0, 20] * 0.5)
-                        tree.data[0, 0:3] += root_extension * tree.data.get('w_basis', 0)
-                        # Should check to see that the extended point does not intersect with another fluid or tissue domain.
-                        fluid_surface_boolean_mesh = tree.export_solid(watertight=True)
-                        if len(self.tissue_domain_surface_meshes) > 0:
-                            tissue_domain = self.tissue_domain_surface_meshes[-1]
+                        constraint_meta = None
+                        if uses_spline_constraints:
+                            if remesh_tissue_surface:
+                                tissue_domain = self._prepare_constrained_tissue_boundary(
+                                    tree.domain.boundary,
+                                    hausd=hausd,
+                                )
+                            else:
+                                tissue_domain = tree.domain.boundary.copy(deep=True)
                         else:
-                            tissue_domain = tree.domain.boundary
-                        tissue_domain = boolean(tissue_domain, fluid_surface_boolean_mesh, operation='difference')
-                        tissue_domain = remesh_surface(tissue_domain, hausd=hausd, verbosity=0)
+                            # Extrude the root of the tree to ensure proper intersection with the tissue domain.
+                            root_extension = max(tree.data[0, 21] * 4, tree.data[0, 20] * 0.5)
+                            tree.data[0, 0:3] += root_extension * tree.data.get('w_basis', 0)
+                            # Should check to see that the extended point does not intersect with another fluid or tissue domain.
+                            fluid_surface_boolean_mesh = tree.export_solid(watertight=True)
+                            if len(self.tissue_domain_surface_meshes) > 0:
+                                tissue_domain = self.tissue_domain_surface_meshes[-1]
+                            else:
+                                tissue_domain = tree.domain.boundary
+                            tissue_domain = boolean(tissue_domain, fluid_surface_boolean_mesh, operation='difference')
+                            tissue_domain = self._remesh_tissue_boundary(tissue_domain, hausd=hausd)
                         #tet_tissue = tetgen.TetGen(tissue_domain)
                         #tree.data[0, 0:3] += root_extension * tree.data.get('w_basis', 0)
-                        try:
-                            # tet_tissue.make_manifold(verbose=False)
-                            # fix = pymeshfix.MeshFix(tissue_domain)
-                            # fix.repair(verbose=True)
-                            grid, nodes, elems = tetrahedralize(tissue_domain, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                        if uses_spline_constraints:
+                            constraint_data = self._collect_tissue_spline_constraints(
+                                tree=tree,
+                                tissue_constraint_points=tissue_constraint_points,
+                                tissue_constraint_lines=tissue_constraint_lines,
+                                tissue_constraint_spline_sample_points=tissue_constraint_spline_sample_points,
+                                tissue_constraint_tolerance=tissue_constraint_tolerance,
+                            )
+                            grid, nodes, elems, constraint_meta = self._build_constrained_tissue_volume_mesh(
+                                tissue_domain,
+                                constraint_data=constraint_data,
+                                minratio=minratio,
+                                mindihedral=mindihedral,
+                                order=order,
+                                tissue_constraint_tolerance=tissue_constraint_tolerance,
+                                tetgen_exe=tetgen_exe,
+                            )
                             tissue_volume_mesh = grid
-                        except:
+                        else:
                             try:
-                                # tet_tissue.make_manifold(verbose=True)
-                                fix = pymeshfix.MeshFix(fix.mesh)
-                                fix.repair()
-                                grid, nodes, elems = tetrahedralize(fix.mesh, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                                # tet_tissue.make_manifold(verbose=False)
+                                # fix = pymeshfix.MeshFix(tissue_domain)
+                                # fix.repair(verbose=True)
+                                grid, nodes, elems = tetrahedralize(tissue_domain, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
                                 tissue_volume_mesh = grid
                             except:
-                                tissue_volume_mesh = None
+                                try:
+                                    # tet_tissue.make_manifold(verbose=True)
+                                    fix = pymeshfix.MeshFix(tissue_domain)
+                                    fix.repair()
+                                    grid, nodes, elems = tetrahedralize(fix.mesh, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                                    tissue_volume_mesh = grid
+                                except:
+                                    tissue_volume_mesh = None
                         if isinstance(tissue_volume_mesh, type(None)):
                             print("Failed to generate tissue volume mesh.")
                             network_tissue_surface_meshes.append(None)
                             network_tissue_volume_meshes.append(None)
+                            self.tissue_constraint_metadata.append(None)
                         else:
                             if remesh_vol:
                                 tissue_volume_mesh = remesh_volume(tissue_volume_mesh, hausd=hausd)
                             tissue_domain = tissue_volume_mesh.extract_surface()
                             network_tissue_surface_meshes.append(tissue_domain)
                             network_tissue_volume_meshes.append(tissue_volume_mesh)
+                            self.tissue_constraint_metadata.append(constraint_meta)
                 self.fluid_domain_surface_meshes.append(network_fluid_surface_meshes)
                 self.fluid_domain_volume_meshes.append(network_fluid_volume_meshes)
                 self.tissue_domain_surface_meshes.append(network_tissue_surface_meshes)
                 self.tissue_domain_volume_meshes.append(network_tissue_volume_meshes)
         elif isinstance(self.synthetic_object, svv.forest.forest.Forest) and not isinstance(self.synthetic_object.connections, type(None)):
-            if fluid or tissue:
-                if tissue:
+            if fluid or (tissue and not uses_spline_constraints):
+                if tissue and not uses_spline_constraints:
                     network_solids, _, _ = self.synthetic_object.connections.export_solid(extrude_roots=True)
                 else:
                     network_solids, _, _ = self.synthetic_object.connections.export_solid(extrude_roots=False)
@@ -415,43 +593,67 @@ class Simulation(object):
             if tissue:
                 tissue_domain = deepcopy(self.synthetic_object.domain.boundary)
                 tissue_domain = tissue_domain.compute_normals(auto_orient_normals=True)
-                fluid_hsize = min([mesh.cell_data["hsize"][0] for mesh in self.fluid_domain_surface_meshes])
                 radii = []
                 for net in range(len(self.synthetic_object.networks)):
                     for tr in range(len(self.synthetic_object.networks[net])):
                         radii.append(self.synthetic_object.networks[net][tr].data[0, 21])
                 hsize = min(radii) * 2.0
                 print("Remeshing tissue domain with edge size {}.".format(hsize))
-                tissue_domain = remesh_surface(tissue_domain, hsiz=hsize, verbosity=0)
-                for i, fluid_surface in enumerate(self.fluid_domain_surface_meshes):
-                    fluid_surface_normals = fluid_surface.compute_normals(auto_orient_normals=True)
-                    print("Performing boolean operation with fluid surface mesh {}.".format(i))
-                    tissue_domain = boolean(tissue_domain, fluid_surface_normals, operation='difference', engine='blender')
-                    tissue_domain = tissue_domain.compute_normals(auto_orient_normals=True)
-                    print("Remeshing tissue domain with edge size {}.".format(fluid_hsize))
-                    #tissue_domain = remesh_surface(tissue_domain, hmin=fluid_hsize, hmax=hsize)
-                    tissue_domain = remesh_surface(tissue_domain, optim=True)
+                if uses_spline_constraints:
+                    tissue_domain = self._prepare_constrained_tissue_boundary(tissue_domain, hsiz=hsize)
+                else:
+                    fluid_hsize = min([mesh.cell_data["hsize"][0] for mesh in self.fluid_domain_surface_meshes])
+                    tissue_domain = self._remesh_tissue_boundary(tissue_domain, hsiz=hsize)
+                    for i, fluid_surface in enumerate(self.fluid_domain_surface_meshes):
+                        fluid_surface_normals = fluid_surface.compute_normals(auto_orient_normals=True)
+                        print("Performing boolean operation with fluid surface mesh {}.".format(i))
+                        tissue_domain = boolean(tissue_domain, fluid_surface_normals, operation='difference', engine='blender')
+                        tissue_domain = tissue_domain.compute_normals(auto_orient_normals=True)
+                        print("Remeshing tissue domain with edge size {}.".format(fluid_hsize))
+                        #tissue_domain = remesh_surface(tissue_domain, hmin=fluid_hsize, hmax=hsize)
+                        tissue_domain = self._remesh_tissue_boundary(tissue_domain, optim=True)
                 self.tissue_domain_surface_meshes.append(tissue_domain)
                 #tissue_domain = remesh_surface(tissue_domain, hausd=hausd)
                 print("Tetrahedralizing tissue domain.")
                 #tet_tissue = tetgen.TetGen(tissue_domain)
-                try:
-                    grid, nodes, elems = tetrahedralize(tissue_domain, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                if uses_spline_constraints:
+                    constraint_data = self._collect_tissue_spline_constraints(
+                        tissue_constraint_points=tissue_constraint_points,
+                        tissue_constraint_lines=tissue_constraint_lines,
+                        tissue_constraint_spline_sample_points=tissue_constraint_spline_sample_points,
+                        tissue_constraint_tolerance=tissue_constraint_tolerance,
+                    )
+                    grid, nodes, elems, constraint_meta = self._build_constrained_tissue_volume_mesh(
+                        tissue_domain,
+                        constraint_data=constraint_data,
+                        minratio=minratio,
+                        mindihedral=mindihedral,
+                        order=order,
+                        tissue_constraint_tolerance=tissue_constraint_tolerance,
+                        tetgen_exe=tetgen_exe,
+                    )
                     tissue_volume_mesh = grid
-                except:
-                    #tet_tissue.make_manifold(verbose=True)
-                    fix = pymeshfix.MeshFix(tissue_domain)
-                    fix.repair()
-                    grid, nodes, elems = tetrahedralize(fix.mesh, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
-                    tissue_volume_mesh = grid
+                else:
+                    constraint_meta = None
+                    try:
+                        grid, nodes, elems = tetrahedralize(tissue_domain, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                        tissue_volume_mesh = grid
+                    except:
+                        #tet_tissue.make_manifold(verbose=True)
+                        fix = pymeshfix.MeshFix(tissue_domain)
+                        fix.repair()
+                        grid, nodes, elems = tetrahedralize(fix.mesh, switches='pq{}/{}MVYSJ'.format(minratio, mindihedral))
+                        tissue_volume_mesh = grid
                 if isinstance(tissue_volume_mesh, type(None)):
                     print("Failed to generate tissue volume mesh.")
+                    self.tissue_constraint_metadata.append(None)
                 else:
                     if remesh_vol:
                         tissue_volume_mesh = remesh_volume(tissue_volume_mesh, hausd=hausd, nosurf=True)
                     tissue_surface = tissue_volume_mesh.extract_surface()
                     self.tissue_domain_surface_meshes[-1] = tissue_surface
                     self.tissue_domain_volume_meshes.append(tissue_volume_mesh)
+                    self.tissue_constraint_metadata.append(constraint_meta)
         else:
             raise ValueError("Unsupported synthetic object type.")
 

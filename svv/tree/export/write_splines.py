@@ -3,6 +3,7 @@ import numpy as np
 import numpy
 from copy import deepcopy
 import os
+from pathlib import Path
 
 def get_longest_path(data, seed_edge):
     dig = True
@@ -246,10 +247,13 @@ def get_interpolated_sv_data(data):
             #interp_n.append(splprep(n, s=0))
     return interp_xyz, interp_r, interp_n, path_frames, branches, interp_xyzr
 
-def write_splines(interp_xyzr, spline_sample_points=100, write_splines=True):
+def write_splines(interp_xyzr, spline_sample_points=100, write_splines=True, outdir=None):
     tree_splines = []
     if write_splines:
-        spline_file = open(os.getcwd() + os.sep + "tree_b_splines.txt", "w+")
+        target_dir = Path(outdir) if outdir is not None else Path(os.getcwd())
+        target_dir.mkdir(parents=True, exist_ok=True)
+        spline_path = target_dir / "tree_b_splines.txt"
+        spline_file = open(spline_path, "w+", encoding="utf-8")
     for vessel in range(len(interp_xyzr)):
         def vessel_spline(t, ctr=interp_xyzr[vessel]):
             return splev(t, ctr[0])

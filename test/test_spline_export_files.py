@@ -1,9 +1,34 @@
+import sys
+import types
+
+
+class _MeshFixStub:
+    def __init__(self, mesh, *args, **kwargs):
+        self.mesh = mesh
+
+    def repair(self, *args, **kwargs):
+        return self.mesh
+
+
+class _TetGenStub:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+sys.modules.setdefault("pymeshfix", types.SimpleNamespace(MeshFix=_MeshFixStub))
+sys.modules.setdefault("tetgen", types.SimpleNamespace(TetGen=_TetGenStub))
+sys.modules.setdefault("meshio", types.SimpleNamespace())
+sys.modules.setdefault("trimesh", types.SimpleNamespace(Trimesh=object))
+
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from svv.forest.export.export_spline import write_splines as write_forest_splines
+from svv.forest.forest import Forest
+from svv.tree.data.data import TreeData
+from svv.tree.tree import Tree
 from svv.visualize.spline_export import export_spline_files
 
 
@@ -319,3 +344,57 @@ def test_forest_spline_writer_returns_all_network_splines_and_files(tmp_path):
         "network_0_b_splines.txt",
         "network_1_b_splines.txt",
     ]
+
+
+
+def _make_tree_object(x_offset: float, y_offset: float = 0.0, radius: float = 0.1):
+    tree = Tree()
+    data = TreeData((2, 31))
+    data[:] = np.nan
+
+    data[0, 0:3] = [x_offset + 0.0, y_offset, 0.0]
+    data[0, 3:6] = [x_offset + 1.0, y_offset, 0.0]
+    data[1, 0:3] = [x_offset + 1.0, y_offset, 0.0]
+    data[1, 3:6] = [x_offset + 2.0, y_offset, 0.0]
+
+    data[:, 12:15] = [1.0, 0.0, 0.0]
+    data[:, 20] = 1.0
+    data[:, 21] = radius
+
+    data[0, 15] = 1
+    data[1, 17] = 0
+    data[0, 26] = 0
+    data[1, 26] = 1
+
+    tree.data = data
+    return tree
+
+
+def test_tree_export_splines_can_return_callables_without_writing(tmp_path, monkeypatch):
+    tree = _make_tree_object(0.0, 0.0)
+    monkeypatch.chdir(tmp_path)
+
+    splines = tree.export_splines(spline_sample_points=7, write_splines=False)
+
+    assert len(splines) == 1
+    assert callable(splines[0])
+    sampled = splines[0](np.linspace(0.0, 1.0, 7))
+    assert len(sampled) == 4
+    assert not (tmp_path / "tree_b_splines.txt").exists()
+
+
+def test_forest_export_splines_can_return_callables_without_writing(tmp_path, monkeypatch):
+    forest = Forest(n_networks=1, n_trees_per_network=[1])
+    tree_connection = _make_connected_tree_connection(network_id=0, x_offset=0.0, y_offset=0.0)
+    forest.connections = SimpleNamespace(tree_connections=[tree_connection])
+    tree_connection.forest = forest
+    monkeypatch.chdir(tmp_path)
+
+    splines = forest.export_splines(spline_sample_points=6, write_splines=False)
+
+    assert len(splines) == 1
+    assert len(splines[0]) == 1
+    assert callable(splines[0][0][0])
+    sampled = splines[0][0][0](np.linspace(0.0, 1.0, 6))
+    assert len(sampled) == 4
+    assert not (tmp_path / "splines_tmp").exists()

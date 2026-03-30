@@ -9,7 +9,7 @@ from svv.tree.utils.TreeManager import KDTreeManager, USearchTree
 from svv.forest.connect.geodesic import geodesic_constructor
 from svv.forest.connect.forest_connection import ForestConnection
 from svv.visualize.forest.show import show
-from svv.forest.export.export_spline import export_spline, write_splines
+from svv.forest.export.export_spline import export_spline, write_splines as write_forest_splines
 
 
 class Forest(object):
@@ -388,18 +388,28 @@ class Forest(object):
                 if os.path.exists(tmp_path):
                     os.replace(tmp_path, dst_path)
 
-    def export_splines(self, outdir=None):
+    def export_splines(self, outdir=None, spline_sample_points=100, write_splines=True):
         """
         Export networks splines
         """
+        all_splines = []
         if isinstance(outdir, type(None)):
             outdir = 'splines_tmp'
-            if not os.path.exists(outdir):
+            if write_splines and not os.path.exists(outdir):
                 os.makedirs(outdir)
         if not isinstance(self.connections, type(None)):
             for i in range(len(self.connections.tree_connections)):
                 interp_xyz, interp_radii, interp_normals, all_points, all_radii, all_normals = export_spline(self.connections.tree_connections[i])
-                _ = write_splines(all_points, all_radii, outdir=outdir, name_prefix="{}".format(i))
+                network_splines = write_forest_splines(
+                    all_points,
+                    all_radii,
+                    spline_sample_points=spline_sample_points,
+                    outdir=outdir,
+                    name_prefix="{}".format(i),
+                    write_splines=write_splines,
+                )
+                all_splines.append(network_splines)
+        return all_splines
 
     def save(self, path: str, include_timing: bool = False):
         """

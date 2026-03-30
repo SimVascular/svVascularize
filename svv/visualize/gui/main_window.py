@@ -465,6 +465,8 @@ class VascularizeGUI(QMainWindow):
         self._zerod_progress_dialog: Optional[QProgressDialog] = None
         self._zerod_stdout_buffer = ""
         self._zerod_stderr_buffer = ""
+        self._constrained_tissue_preview_actors = []
+        self._last_constrained_tissue_simulation = None
 
         # Persistent layout
         self.settings = QSettings("SimVascular", "svVascularize")
@@ -879,6 +881,13 @@ class VascularizeGUI(QMainWindow):
         export_3d_action.setStatusTip("Build meshes and export 3D simulation setup for the current tree or forest")
         export_3d_action.triggered.connect(self.export_3d_simulation_dialog)
         simulate_menu.addAction(export_3d_action)
+
+        self.build_constrained_tissue_mesh_action = QAction("Build Constrained Tissue Mesh...", self)
+        self.build_constrained_tissue_mesh_action.setStatusTip(
+            "Build a spline-constrained tissue mesh and preview the tissue surface in the viewport"
+        )
+        self.build_constrained_tissue_mesh_action.triggered.connect(self.build_constrained_tissue_mesh_dialog)
+        simulate_menu.addAction(self.build_constrained_tissue_mesh_action)
 
         inspect_solution_action = QAction("Inspect Solutions...", self)
         inspect_solution_action.setStatusTip("Inspect time-varying simulation solutions in a dedicated viewport")
@@ -1299,6 +1308,153 @@ class VascularizeGUI(QMainWindow):
                 action="require_synthetic_object",
             )
         return obj
+
+    @staticmethod
+    def _iter_nested_meshes(meshes):
+        if meshes is None:
+            return
+        if isinstance(meshes, (list, tuple)):
+            for item in meshes:
+                yield from VascularizeGUI._iter_nested_meshes(item)
+            return
+        yield meshes
+
+    def _clear_constrained_tissue_mesh_preview(self):
+        if not self._constrained_tissue_preview_actors:
+            return
+        plotter = getattr(self.vtk_widget, "plotter", None)
+        if plotter is not None:
+            for actor in self._constrained_tissue_preview_actors:
+                try:
+                    plotter.remove_actor(actor)
+                except Exception:
+                    pass
+        self._constrained_tissue_preview_actors = []
+
+    def _show_constrained_tissue_mesh_preview(self, surfaces):
+        plotter = getattr(self.vtk_widget, "plotter", None)
+        if plotter is None:
+            return
+
+        self._clear_constrained_tissue_mesh_preview()
+        surface_color = CADTheme.get_color('viewport', 'domain-surface')
+        edge_color = CADTheme.get_color('viewport', 'domain-edge')
+        for idx, surface in enumerate(surfaces):
+            actor = plotter.add_mesh(
+                surface,
+                color=surface_color,
+                opacity=0.55,
+                show_edges=True,
+                edge_color=edge_color,
+                line_width=1,
+                specular=0.15,
+                smooth_shading=True,
+                name=f"constrained_tissue_mesh_{idx}",
+            )
+            self._constrained_tissue_preview_actors.append(actor)
+        self.vtk_widget.request_render()
+
+    def _build_constrained_tissue_mesh(self, obj, *, spline_sample_points: int, tolerance: float,
+                                       show_overlay: bool = True):
+        from svv.simulation.simulation import Simulation
+
+        sim = Simulation(obj)
+        sim.build_meshes(
+            fluid=False,
+            tissue=True,
+            tissue_mesh_type="spline_point_constrained",
+            tissue_constraint_spline_sample_points=int(spline_sample_points),
+            tissue_constraint_tolerance=float(tolerance),
+        )
+
+        volume_meshes = [
+            mesh for mesh in self._iter_nested_meshes(sim.tissue_domain_volume_meshes)
+            if mesh is not None
+        ]
+        if not volume_meshes:
+            raise RuntimeError("No constrained tissue volume mesh was produced.")
+
+        surfaces = []
+        for mesh in volume_meshes:
+            surface = mesh.extract_surface()
+            if surface is not None and getattr(surface, "n_points", 0) > 0:
+                surfaces.append(surface)
+
+        if show_overlay and surfaces:
+            self._show_constrained_tissue_mesh_preview(surfaces)
+
+        self._last_constrained_tissue_simulation = sim
+        return sim, volume_meshes, surfaces
+
+    def build_constrained_tissue_mesh_dialog(self):
+        obj = self._require_synthetic_object()
+        if obj is None:
+            return
+        if getattr(getattr(obj, "domain", None), "boundary", None) is None:
+            QMessageBox.warning(
+                self,
+                "Missing Domain",
+                "The current Tree or Forest does not have a domain boundary."
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Build Constrained Tissue Mesh")
+        form = QFormLayout(dlg)
+
+        sample_spin = QSpinBox()
+        sample_spin.setRange(2, 10000)
+        sample_spin.setValue(100)
+        sample_spin.setToolTip("Number of sampled spline points per vessel used as constrained nodes.")
+        form.addRow("Sample points per vessel:", sample_spin)
+
+        tolerance_spin = QDoubleSpinBox()
+        tolerance_spin.setDecimals(8)
+        tolerance_spin.setRange(1e-8, 1.0)
+        tolerance_spin.setSingleStep(1e-6)
+        tolerance_spin.setValue(1e-6)
+        tolerance_spin.setToolTip("Exact node-match tolerance used after constrained tetrahedralization.")
+        form.addRow("Node-match tolerance:", tolerance_spin)
+
+        overlay_cb = QCheckBox("Show tissue mesh overlay in viewport")
+        overlay_cb.setChecked(True)
+        form.addRow("", overlay_cb)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        try:
+            self.show_progress("Building constrained tissue mesh...")
+            QApplication.processEvents()
+            sim, volume_meshes, _ = self._build_constrained_tissue_mesh(
+                obj,
+                spline_sample_points=sample_spin.value(),
+                tolerance=float(tolerance_spin.value()),
+                show_overlay=overlay_cb.isChecked(),
+            )
+            total_cells = sum(int(getattr(mesh, "n_cells", 0)) for mesh in volume_meshes)
+            meta = getattr(sim, "tissue_constraint_metadata", None) or []
+            self.log_output(
+                f"[3D] built constrained tissue mesh with {len(volume_meshes)} volume mesh(es), "
+                f"{total_cells} cells, sample points per vessel={sample_spin.value()}, "
+                f"constraint metadata={meta}"
+            )
+            self.update_status("Constrained tissue mesh built")
+        except Exception as e:
+            self._record_telemetry(e, action="build_constrained_tissue_mesh")
+            self.update_status("Constrained tissue mesh build failed")
+            QMessageBox.critical(
+                self,
+                "Build Constrained Tissue Mesh Failed",
+                f"Failed to build the constrained tissue mesh:\n\n{e}"
+            )
+        finally:
+            self.hide_progress()
 
     def export_centerlines_dialog(self):
         """Export centerline spline data for the current Tree/Forest."""
@@ -2948,7 +3104,12 @@ class VascularizeGUI(QMainWindow):
             if cancel_event.is_set():
                 return None
 
-            if domain.boundary is None and hasattr(domain, 'patches') and len(domain.patches) > 0:
+            if (
+                getattr(domain, 'boundary', None) is None
+                and not getattr(domain, '_build_failed', False)
+                and hasattr(domain, 'patches')
+                and len(domain.patches) > 0
+            ):
                 report_progress(92, "Building boundary from patches...")
                 domain.build(progress_callback=make_stage_reporter(92, 98))
                 report_progress(98, "Boundary built")
@@ -3005,7 +3166,9 @@ class VascularizeGUI(QMainWindow):
                     f"<i>Loading {suffix} file will run:<br>"
                     f"• create() - Initialize implicit function<br>"
                     f"• solve() - Compute evaluation structures<br>"
-                    f"• build() - Tetrahedralize and extract boundary</i>"
+                    f"• build() - Tetrahedralize and extract boundary<br><br>"
+                    f"Large mesh files can take a while here.<br>"
+                    f"For faster future reloads, save the result as a .dmn file and include the full mesh.</i>"
                 )
                 info_label.setWordWrap(True)
                 form.addRow(info_label)
