@@ -16,24 +16,214 @@ def _format_indices(index):
     return str(index)
 
 
+class TrackedIndexList(list):
+    """List that notifies a callback whenever its contents change."""
+
+    def __init__(self, values=(), *, on_change=None):
+        super().__init__(values)
+        self._on_change = on_change
+
+    def bind(self, on_change):
+        self._on_change = on_change
+
+    def _mark_changed(self):
+        if self._on_change is not None:
+            self._on_change()
+
+    def append(self, value):
+        super().append(value)
+        self._mark_changed()
+
+    def extend(self, values):
+        super().extend(values)
+        self._mark_changed()
+
+    def insert(self, index, value):
+        super().insert(index, value)
+        self._mark_changed()
+
+    def pop(self, index=-1):
+        value = super().pop(index)
+        self._mark_changed()
+        return value
+
+    def remove(self, value):
+        super().remove(value)
+        self._mark_changed()
+
+    def clear(self):
+        super().clear()
+        self._mark_changed()
+
+    def reverse(self):
+        super().reverse()
+        self._mark_changed()
+
+    def sort(self, *args, **kwargs):
+        super().sort(*args, **kwargs)
+        self._mark_changed()
+
+    def __delitem__(self, index):
+        super().__delitem__(index)
+        self._mark_changed()
+
+    def __setitem__(self, index, value):
+        super().__setitem__(index, value)
+        self._mark_changed()
+
+    def __iadd__(self, values):
+        result = super().__iadd__(values)
+        self._mark_changed()
+        return result
+
+    def __imul__(self, value):
+        result = super().__imul__(value)
+        self._mark_changed()
+        return result
+
+
+class TreeMapEntry(dict):
+    """Tracked adjacency entry for a single vessel."""
+
+    def __init__(self, key, value=None, *, on_downstream_change=None):
+        super().__init__()
+        self._key = int(key)
+        self._on_downstream_change = on_downstream_change
+        payload = {} if value is None else dict(value)
+        self["upstream"] = payload.get("upstream", [])
+        self["downstream"] = payload.get("downstream", [])
+
+    def bind(self, key, on_downstream_change):
+        self._key = int(key)
+        self._on_downstream_change = on_downstream_change
+        for field in ("upstream", "downstream"):
+            if field in self:
+                self[field] = self[field]
+
+    def _notify_downstream_change(self):
+        if self._on_downstream_change is not None:
+            self._on_downstream_change(self._key)
+
+    def _wrap_list(self, field, value):
+        callback = self._notify_downstream_change if field == "downstream" else None
+        if isinstance(value, TrackedIndexList):
+            value.bind(callback)
+            return value
+        return TrackedIndexList(value, on_change=callback)
+
+    def __setitem__(self, field, value):
+        if field in ("upstream", "downstream"):
+            value = self._wrap_list(field, value)
+        super().__setitem__(field, value)
+        if field == "downstream":
+            self._notify_downstream_change()
+
+    def __delitem__(self, field):
+        super().__delitem__(field)
+        if field == "downstream":
+            self._notify_downstream_change()
+
+    def update(self, *args, **kwargs):
+        payload = dict(*args, **kwargs)
+        for key, value in payload.items():
+            self[key] = value
+
+    def pop(self, key, *args):
+        value = super().pop(key, *args)
+        if key == "downstream":
+            self._notify_downstream_change()
+        return value
+
+    def clear(self):
+        had_downstream = "downstream" in self
+        super().clear()
+        if had_downstream:
+            self._notify_downstream_change()
+
+
 class TreeMap(dict):
     """Adjacency map used by :class:`~svv.tree.tree.Tree`.
 
-    Keys are integer vessel indices.  Each value is a dictionary with two
-    well-known entries:
+    Keys are integer vessel indices.  Each value is a tracked adjacency entry
+    with two well-known fields:
 
     - ``"upstream"``: list of immediate parent vessel indices (empty for the
       root segment).
     - ``"downstream"``: list of child vessel indices created during
       bifurcation.
 
-    The growth and connectivity routines populate this mapping so callers can
-    traverse the generated vasculature without re-deriving relationships from
-    :class:`TreeData` each time.
+    Downstream mutations can notify an owning :class:`~svv.tree.tree.Tree` so
+    cached NumPy adjacency views stay coherent with the authoritative Python
+    lists.
     """
-    def __new__(cls, *args, **kwargs):
-        data = super().__new__(cls, *args, **kwargs)
-        return data
+
+    def __init__(self, initial=None, *, on_downstream_change=None):
+        super().__init__()
+        self._on_downstream_change = on_downstream_change
+        if initial is not None:
+            self.update(initial)
+
+    def bind(self, on_downstream_change):
+        self._on_downstream_change = on_downstream_change
+        for key, value in super().items():
+            value.bind(key, self._on_downstream_change)
+
+    def __setitem__(self, key, value):
+        key = int(key)
+        if isinstance(value, TreeMapEntry):
+            value.bind(key, self._on_downstream_change)
+            wrapped = value
+        else:
+            wrapped = TreeMapEntry(
+                key,
+                value,
+                on_downstream_change=self._on_downstream_change,
+            )
+        super().__setitem__(key, wrapped)
+        if self._on_downstream_change is not None:
+            self._on_downstream_change(key)
+
+    def __delitem__(self, key):
+        key = int(key)
+        super().__delitem__(key)
+        if self._on_downstream_change is not None:
+            self._on_downstream_change(key)
+
+    def update(self, *args, **kwargs):
+        payload = dict(*args, **kwargs)
+        for key, value in payload.items():
+            self[key] = value
+
+    def setdefault(self, key, default=None):
+        key = int(key)
+        if key not in self:
+            self[key] = {} if default is None else default
+        return self[key]
+
+    def pop(self, key, *args):
+        key = int(key)
+        value = super().pop(key, *args)
+        if self._on_downstream_change is not None:
+            self._on_downstream_change(key)
+        return value
+
+    def clear(self):
+        super().clear()
+        if self._on_downstream_change is not None:
+            self._on_downstream_change(None)
+
+
+def serialize_tree_map(vessel_map):
+    """Return a plain dict-of-lists representation of a vessel map."""
+
+    plain = {}
+    for key, value in vessel_map.items():
+        plain[int(key)] = {
+            "upstream": list(value.get("upstream", [])),
+            "downstream": list(value.get("downstream", [])),
+        }
+    return plain
+
 
 
 class TreeParameters(object):

@@ -683,7 +683,8 @@ def add_vessel(tree, **kwargs):
                         start_3_2 = perf_counter()
                         added_vessels = [terminal_vessel, terminal_daughter_vessel, parent_vessel]
                         #new_vessels = tree.data.copy(order='C')
-                        tmp_28 = data[:, 28].copy()
+                        tmp_28 = tree._tmp_28_work[:data.shape[0]]
+                        np.copyto(tmp_28, data[:, 28])
                         #new_vessels = deepcopy(tree.data)
                         change_i = []
                         change_j = []
@@ -732,8 +733,8 @@ def add_vessel(tree, **kwargs):
                             bifurcation_ratios = np.empty((1, 2), dtype=float)
                         N = data.shape[0]
                         W = data.shape[1]
-                        downstream_bif = tree.vessel_map[bifurcation_vessel]["downstream"]
-                        D0 = len(downstream_bif)
+                        downstream_bif = tree.get_downstream_indices(bifurcation_vessel)
+                        D0 = downstream_bif.size
 
                         has_children = not np.any(np.isnan(terminal_daughter_vessel[0, 15:17]))
                         child_updates = 2 if has_children else 0  # matches current logic (either 2 or 0)
@@ -743,19 +744,18 @@ def add_vessel(tree, **kwargs):
                         alt_scale_valid = alt_scale[alt_valid_mask]
 
                         # Count the exact number of updates that update_alt would emit (python fallback semantics)
-                        alt_desc_total = 0
-                        for idx in alt_valid:
-                            alt_desc_total += len(tree.vessel_map[int(idx)]["downstream"])
+                        alt_desc_total = tree.sum_downstream_counts(alt_valid)
 
                         n_update_alt = 1 + (6 * main_idx.size) + alt_desc_total + alt_valid.size
                         n_chunk_3_5 = (2 * D0) + child_updates
                         n_chunk_3_6 = N + W
                         n_total = n_update_alt + n_chunk_3_5 + n_chunk_3_6
 
-                        change_i = np.empty(n_total, dtype=np.intp)
-                        change_j = np.empty(n_total, dtype=np.intp)
-                        new_data = np.empty(n_total, dtype=data.dtype)
-                        old_data = np.empty(n_total, dtype=data.dtype)
+                        tree._ensure_change_work_capacity(n_total, data.dtype)
+                        change_i = tree._change_i_work[:n_total]
+                        change_j = tree._change_j_work[:n_total]
+                        new_data = tree._new_data_work[:n_total]
+                        old_data = tree._old_data_work[:n_total]
                         p = 0
 
                         #change_i.append(0)
@@ -771,28 +771,31 @@ def add_vessel(tree, **kwargs):
 
                         # Main idx updates: (22,25,27,28,23,24) for each main_idx
                         if main_idx.size:
-                            cols_main = np.array([22, 25, 27, 28, 23, 24], dtype=np.intp)
-                            ncols = cols_main.size
-                            rows = np.repeat(main_idx, ncols)
-                            cols = np.tile(cols_main, main_idx.size)
+                            n_main = main_idx.size
+                            n = 6 * n_main
+                            sl = slice(p, p + n)
 
-                            new_mat = np.column_stack(
-                                (
-                                    flows,
-                                    reduced_resistance,
-                                    reduced_length,
-                                    main_scale,
-                                    bifurcation_ratios[:, 0],
-                                    bifurcation_ratios[:, 1],
-                                )
-                            ).astype(data.dtype, copy=False)
-                            old_mat = data[main_idx][:, cols_main].astype(data.dtype, copy=False)
+                            change_i_view = change_i[sl].reshape(n_main, 6)
+                            change_j_view = change_j[sl].reshape(n_main, 6)
+                            new_data_view = new_data[sl].reshape(n_main, 6)
+                            old_data_view = old_data[sl].reshape(n_main, 6)
 
-                            n = rows.size
-                            change_i[p: p + n] = rows
-                            change_j[p: p + n] = cols
-                            new_data[p: p + n] = new_mat.ravel(order="C")
-                            old_data[p: p + n] = old_mat.ravel(order="C")
+                            change_i_view[:] = main_idx[:, None]
+                            change_j_view[:] = tree._main_update_cols
+
+                            new_data_view[:, 0] = flows
+                            new_data_view[:, 1] = reduced_resistance
+                            new_data_view[:, 2] = reduced_length
+                            new_data_view[:, 3] = main_scale
+                            new_data_view[:, 4] = bifurcation_ratios[:, 0]
+                            new_data_view[:, 5] = bifurcation_ratios[:, 1]
+
+                            old_data_view[:, 0] = data[main_idx, 22]
+                            old_data_view[:, 1] = data[main_idx, 25]
+                            old_data_view[:, 2] = data[main_idx, 27]
+                            old_data_view[:, 3] = data[main_idx, 28]
+                            old_data_view[:, 4] = data[main_idx, 23]
+                            old_data_view[:, 5] = data[main_idx, 24]
                             p += n
 
                             tmp_28[main_idx] = main_scale
@@ -815,10 +818,9 @@ def add_vessel(tree, **kwargs):
                         # Alt subtree updates (col 28 for downstream + the alt root itself), and mutate tmp_28
                         for idx, scale in zip(alt_valid, alt_scale_valid):
                             idx_int = int(idx)
-                            ds_list = tree.vessel_map[idx_int]["downstream"]
-                            if ds_list:
-                                ds = np.asarray(ds_list, dtype=np.intp)
-                                m = ds.size
+                            ds = tree.get_downstream_indices(idx_int)
+                            m = ds.size
+                            if m:
                                 change_i[p: p + m] = ds
                                 change_j[p: p + m] = 28
 
@@ -1055,20 +1057,20 @@ def add_vessel(tree, **kwargs):
                         #new_vessels[-1, :] = terminal_daughter_vessel
                         """
                         # --- chunk_3_6: radii for all existing vessels + parent row overwrite ---
-                        tmp_radii = np.empty(N, dtype=data.dtype)
+                        tmp_radii = tree._radius_work[:N]
                         if tree.n_terminals < 10000:
                             np.multiply(tmp_28, root_radius, out=tmp_radii)
                         else:
                             ne_multiply(tmp_28, root_radius, tmp_radii)
 
-                        rows = np.arange(N, dtype=np.intp)
+                        rows = tree._row_idx_cache[:N]
                         change_i[p: p + N] = rows
                         change_j[p: p + N] = 21
                         new_data[p: p + N] = tmp_radii
                         old_data[p: p + N] = data[:, 21]
                         p += N
 
-                        cols = np.arange(W, dtype=np.intp)
+                        cols = tree._col_idx_cache[:W]
                         change_i[p: p + W] = bifurcation_vessel
                         change_j[p: p + W] = cols
                         new_data[p: p + W] = parent_vessel[0, :]
@@ -1503,7 +1505,8 @@ def add_vessel(tree, **kwargs):
                         #new_vessels = deepcopy(tree.data)
                         #new_vessels = tree.data.copy(order='C')
                         #new_vessels = tree.data_copy
-                        tmp_28 = data[:, 28].copy()
+                        tmp_28 = tree._tmp_28_work[:data.shape[0]]
+                        np.copyto(tmp_28, data[:, 28])
                         change_i = []
                         change_j = []
                         new_data = []
@@ -1539,8 +1542,8 @@ def add_vessel(tree, **kwargs):
                             bifurcation_ratios = np.empty((1, 2), dtype=float)
                         N = data.shape[0]
                         W = data.shape[1]
-                        downstream_bif = tree.vessel_map[bifurcation_vessel]["downstream"]
-                        D0 = len(downstream_bif)
+                        downstream_bif = tree.get_downstream_indices(bifurcation_vessel)
+                        D0 = downstream_bif.size
 
                         has_children = not np.any(np.isnan(terminal_daughter_vessel[0, 15:17]))
                         child_updates = 2 if has_children else 0  # matches current logic (either 2 or 0)
@@ -1550,19 +1553,18 @@ def add_vessel(tree, **kwargs):
                         alt_scale_valid = alt_scale[alt_valid_mask]
 
                         # Count the exact number of updates that update_alt would emit (python fallback semantics)
-                        alt_desc_total = 0
-                        for idx in alt_valid:
-                            alt_desc_total += len(tree.vessel_map[int(idx)]["downstream"])
+                        alt_desc_total = tree.sum_downstream_counts(alt_valid)
 
                         n_update_alt = 1 + (6 * main_idx.size) + alt_desc_total + alt_valid.size
                         n_chunk_3_5 = (2 * D0) + child_updates
                         n_chunk_3_6 = N + W
                         n_total = n_update_alt + n_chunk_3_5 + n_chunk_3_6
 
-                        change_i = np.empty(n_total, dtype=np.intp)
-                        change_j = np.empty(n_total, dtype=np.intp)
-                        new_data = np.empty(n_total, dtype=data.dtype)
-                        old_data = np.empty(n_total, dtype=data.dtype)
+                        tree._ensure_change_work_capacity(n_total, data.dtype)
+                        change_i = tree._change_i_work[:n_total]
+                        change_j = tree._change_j_work[:n_total]
+                        new_data = tree._new_data_work[:n_total]
+                        old_data = tree._old_data_work[:n_total]
                         p = 0
 
                         #change_i.append(0)
@@ -1578,28 +1580,31 @@ def add_vessel(tree, **kwargs):
 
                         # Main idx updates: (22,25,27,28,23,24) for each main_idx
                         if main_idx.size:
-                            cols_main = np.array([22, 25, 27, 28, 23, 24], dtype=np.intp)
-                            ncols = cols_main.size
-                            rows = np.repeat(main_idx, ncols)
-                            cols = np.tile(cols_main, main_idx.size)
+                            n_main = main_idx.size
+                            n = 6 * n_main
+                            sl = slice(p, p + n)
 
-                            new_mat = np.column_stack(
-                                (
-                                    flows,
-                                    reduced_resistance,
-                                    reduced_length,
-                                    main_scale,
-                                    bifurcation_ratios[:, 0],
-                                    bifurcation_ratios[:, 1],
-                                )
-                            ).astype(data.dtype, copy=False)
-                            old_mat = data[main_idx][:, cols_main].astype(data.dtype, copy=False)
+                            change_i_view = change_i[sl].reshape(n_main, 6)
+                            change_j_view = change_j[sl].reshape(n_main, 6)
+                            new_data_view = new_data[sl].reshape(n_main, 6)
+                            old_data_view = old_data[sl].reshape(n_main, 6)
 
-                            n = rows.size
-                            change_i[p: p + n] = rows
-                            change_j[p: p + n] = cols
-                            new_data[p: p + n] = new_mat.ravel(order="C")
-                            old_data[p: p + n] = old_mat.ravel(order="C")
+                            change_i_view[:] = main_idx[:, None]
+                            change_j_view[:] = tree._main_update_cols
+
+                            new_data_view[:, 0] = flows
+                            new_data_view[:, 1] = reduced_resistance
+                            new_data_view[:, 2] = reduced_length
+                            new_data_view[:, 3] = main_scale
+                            new_data_view[:, 4] = bifurcation_ratios[:, 0]
+                            new_data_view[:, 5] = bifurcation_ratios[:, 1]
+
+                            old_data_view[:, 0] = data[main_idx, 22]
+                            old_data_view[:, 1] = data[main_idx, 25]
+                            old_data_view[:, 2] = data[main_idx, 27]
+                            old_data_view[:, 3] = data[main_idx, 28]
+                            old_data_view[:, 4] = data[main_idx, 23]
+                            old_data_view[:, 5] = data[main_idx, 24]
                             p += n
 
                             tmp_28[main_idx] = main_scale
@@ -1622,10 +1627,9 @@ def add_vessel(tree, **kwargs):
                         # Alt subtree updates (col 28 for downstream + the alt root itself), and mutate tmp_28
                         for idx, scale in zip(alt_valid, alt_scale_valid):
                             idx_int = int(idx)
-                            ds_list = tree.vessel_map[idx_int]["downstream"]
-                            if ds_list:
-                                ds = np.asarray(ds_list, dtype=np.intp)
-                                m = ds.size
+                            ds = tree.get_downstream_indices(idx_int)
+                            m = ds.size
+                            if m:
                                 change_i[p: p + m] = ds
                                 change_j[p: p + m] = 28
 
@@ -1846,13 +1850,13 @@ def add_vessel(tree, **kwargs):
                         old_data[p: p + W] = data[bifurcation_vessel, :]
                         p += W
                         """
-                        tmp_radii = np.zeros((data.shape[0], 1))
+                        tmp_radii = tree._radius_work[:N]
                         if tree.n_terminals < 10000:
                             #np.multiply(new_vessels[:, 28], new_vessels[0, 21], out=new_vessels[:, 21])
-                            np.multiply(tmp_28, root_radius, out=tmp_radii[:, 0])
+                            np.multiply(tmp_28, root_radius, out=tmp_radii)
                         else:
                             #ne_multiply(new_vessels[:, 28], new_vessels[0, 21], new_vessels[:, 21])
-                            ne_multiply(tmp_28, root_radius, tmp_radii[:, 0])
+                            ne_multiply(tmp_28, root_radius, tmp_radii)
                             #scale_column_with_multiply(new_vessels, 28, new_vessels[0, 21], 21)
                             #multiply_columns(new_vessels)
                         #new_vessels[:, 21] = multiply_elements(new_vessels[:, 28], new_vessels[0, 21])
@@ -1863,13 +1867,13 @@ def add_vessel(tree, **kwargs):
                         #    print('col 28 mismatch')
                         #idxs = np.arange(data.shape[0]).astype(int)
                         #change_i.extend(idxs.tolist())
-                        change_i.extend(range(data.shape[0]))
+                        change_i.extend(tree._row_idx_cache[:N])
                         change_j.extend([21]*data.shape[0])
-                        new_data.extend(tmp_radii.flatten().tolist())
+                        new_data.extend(tmp_radii.tolist())
                         old_data.extend(data[:, 21].tolist())
                         #new_vessels[bifurcation_vessel, :] = parent_vessel
                         change_i.extend([bifurcation_vessel]*data.shape[1])
-                        change_j.extend(np.arange(data.shape[1]).astype(int).tolist())
+                        change_j.extend(tree._col_idx_cache[:W])
                         new_data.extend(parent_vessel[0, :].tolist())
                         old_data.extend(data[bifurcation_vessel, :].tolist())
                         appended_vessels = numpy.vstack([terminal_vessel, terminal_daughter_vessel])

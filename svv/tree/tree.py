@@ -8,7 +8,7 @@ from copy import deepcopy
 from types import MappingProxyType
 import itertools
 from typing import Optional
-from svv.tree.data.data import TreeData, TreeParameters, TreeMap
+from svv.tree.data.data import TreeData, TreeParameters, TreeMap, serialize_tree_map
 from svv.tree.data.units import UnitSystem
 from svv.tree.branch.root import set_root
 from svv.visualize.tree.show import show
@@ -41,7 +41,6 @@ class Tree(object):
             self.parameters = parameters
             if unit_system is not None:
                 self.parameters.set_unit_system(unit_system)
-        self.vessel_map = TreeMap()
         #self.c_vessel_map = None
         self.physical_clearance = 0.0
         self.domain = None
@@ -58,6 +57,21 @@ class Tree(object):
         self.segment_count = 0
         self._idx_cache = []
         self._col21_cache = []
+        self._row_idx_cache = np.arange(self.preallocation_step, dtype=np.intp)
+        self._col_idx_cache = np.arange(self.preallocate.shape[1], dtype=np.intp)
+        self._radius_work = np.empty(self.preallocation_step, dtype=self.preallocate.dtype)
+        self._tmp_28_work = np.empty(self.preallocation_step, dtype=self.preallocate.dtype)
+        self._change_i_work = np.empty(self.preallocation_step, dtype=np.intp)
+        self._change_j_work = np.empty(self.preallocation_step, dtype=np.intp)
+        self._new_data_work = np.empty(self.preallocation_step, dtype=self.preallocate.dtype)
+        self._old_data_work = np.empty(self.preallocation_step, dtype=self.preallocate.dtype)
+        self._main_update_cols = np.array([22, 25, 27, 28, 23, 24], dtype=np.intp)
+        self._empty_downstream = np.empty(0, dtype=np.intp)
+        self._downstream_idx_cache = np.empty(self.preallocation_step, dtype=object)
+        self._downstream_idx_cache[:] = None
+        self._downstream_count_cache = np.zeros(self.preallocation_step, dtype=np.intp)
+        self._downstream_dirty = np.ones(self.preallocation_step, dtype=bool)
+        self._vessel_map = TreeMap(on_downstream_change=self._mark_downstream_cache_dirty)
         #self.preallocate_connectivity = (np.ones((self.preallocation_step, 3)) * -1).astype(int)
         self.preallocate_midpoints = np.zeros((self.preallocation_step, 3))
         self.times = {'vessels':[],
@@ -89,6 +103,184 @@ class Tree(object):
                       'chunk_4_3':[],
                       'chunk_5':[],
                       'all':[]}
+        self.vessel_map = TreeMap()
+
+    @property
+    def vessel_map(self):
+        return self._vessel_map
+
+    @vessel_map.setter
+    def vessel_map(self, value):
+        if not isinstance(value, TreeMap):
+            value = TreeMap(value)
+        keys = list(value.keys())
+        if keys:
+            self._ensure_adjacency_cache_capacity(max(int(k) for k in keys) + 1)
+        value.bind(self._mark_downstream_cache_dirty)
+        self._vessel_map = value
+        self._downstream_idx_cache[:] = None
+        self._downstream_count_cache[:] = 0
+        self._downstream_dirty[:] = True
+
+    def _ensure_adjacency_cache_capacity(self, required_rows: int) -> None:
+        try:
+            required = int(required_rows)
+        except Exception:
+            return
+        if required <= 0:
+            return
+
+        current = int(getattr(self._downstream_idx_cache, "shape", (0,))[0]) or 0
+        if required <= current:
+            return
+
+        new_size = max(required, max(1, current * 2))
+        new_idx_cache = np.empty(new_size, dtype=object)
+        new_idx_cache[:] = None
+        if current:
+            new_idx_cache[:current] = self._downstream_idx_cache[:current]
+        self._downstream_idx_cache = new_idx_cache
+
+        new_count_cache = np.zeros(new_size, dtype=np.intp)
+        if current:
+            new_count_cache[:current] = self._downstream_count_cache[:current]
+        self._downstream_count_cache = new_count_cache
+
+        new_dirty = np.ones(new_size, dtype=bool)
+        if current:
+            new_dirty[:current] = self._downstream_dirty[:current]
+        self._downstream_dirty = new_dirty
+
+    def _mark_downstream_cache_dirty(self, key=None) -> None:
+        if key is None:
+            self._downstream_dirty[:] = True
+            return
+        idx = int(key)
+        if idx < 0:
+            return
+        self._ensure_adjacency_cache_capacity(idx + 1)
+        self._downstream_dirty[idx] = True
+
+    def _refresh_downstream_cache(self, key: int) -> None:
+        idx = int(key)
+        if idx < 0:
+            return
+        self._ensure_adjacency_cache_capacity(idx + 1)
+        entry = self._vessel_map.get(idx)
+        if entry is None:
+            self._downstream_idx_cache[idx] = self._empty_downstream
+            self._downstream_count_cache[idx] = 0
+        else:
+            downstream = entry.get("downstream", ())
+            if len(downstream):
+                arr = np.asarray(downstream, dtype=np.intp)
+            else:
+                arr = self._empty_downstream
+            self._downstream_idx_cache[idx] = arr
+            self._downstream_count_cache[idx] = arr.size
+        self._downstream_dirty[idx] = False
+
+    def _ensure_downstream_cache_keys(self, keys):
+        keys_arr = np.asarray(keys, dtype=np.intp)
+        if keys_arr.size == 0:
+            return keys_arr
+        self._ensure_adjacency_cache_capacity(int(keys_arr.max()) + 1)
+        for key in np.unique(keys_arr):
+            if self._downstream_dirty[key] or self._downstream_idx_cache[key] is None:
+                self._refresh_downstream_cache(int(key))
+        return keys_arr
+
+    def get_downstream_indices(self, key: int):
+        idx = int(key)
+        if idx < 0:
+            return self._empty_downstream
+        self._ensure_adjacency_cache_capacity(idx + 1)
+        if self._downstream_dirty[idx] or self._downstream_idx_cache[idx] is None:
+            self._refresh_downstream_cache(idx)
+        return self._downstream_idx_cache[idx]
+
+    def get_downstream_count(self, key: int) -> int:
+        idx = int(key)
+        if idx < 0:
+            return 0
+        self._ensure_adjacency_cache_capacity(idx + 1)
+        if self._downstream_dirty[idx] or self._downstream_idx_cache[idx] is None:
+            self._refresh_downstream_cache(idx)
+        return int(self._downstream_count_cache[idx])
+
+    def get_downstream_counts(self, keys):
+        keys_arr = self._ensure_downstream_cache_keys(keys)
+        if keys_arr.size == 0:
+            return np.empty(0, dtype=np.intp)
+        return self._downstream_count_cache[keys_arr]
+
+    def sum_downstream_counts(self, keys) -> int:
+        total = 0
+        max_idx = -1
+        cached_keys = []
+        for key in keys:
+            idx = int(key)
+            if idx < 0:
+                continue
+            cached_keys.append(idx)
+            if idx > max_idx:
+                max_idx = idx
+
+        if max_idx < 0:
+            return 0
+
+        self._ensure_adjacency_cache_capacity(max_idx + 1)
+        for idx in cached_keys:
+            if self._downstream_dirty[idx] or self._downstream_idx_cache[idx] is None:
+                self._refresh_downstream_cache(idx)
+            total += int(self._downstream_count_cache[idx])
+        return total
+
+    def _refresh_growth_work_caches(self) -> None:
+        """
+        Refresh reusable NumPy work buffers tied to `self.preallocate`.
+
+        Tree growth repeatedly needs row indices, a fixed column-index range,
+        and a temporary radius buffer. Reallocating those arrays inside hot
+        growth loops adds avoidable overhead, so keep capacity-sized caches on
+        the tree and refresh them only when the preallocation grows.
+        """
+        capacity = int(getattr(self.preallocate, "shape", (0,))[0]) or 0
+        width = int(getattr(self.preallocate, "shape", (0, 0))[1]) or 0
+        self._row_idx_cache = np.arange(capacity, dtype=np.intp)
+        self._col_idx_cache = np.arange(width, dtype=np.intp)
+        self._radius_work = np.empty(capacity, dtype=self.preallocate.dtype)
+        self._tmp_28_work = np.empty(capacity, dtype=self.preallocate.dtype)
+        self._ensure_adjacency_cache_capacity(capacity)
+
+    def _ensure_change_work_capacity(self, required_updates: int, data_dtype=None) -> None:
+        """
+        Ensure reusable change-log buffers can hold `required_updates` entries.
+
+        Growth staging writes the same four arrays each iteration. Keep them as
+        tree-owned work buffers so chunk_3_4 can reuse storage instead of
+        allocating fresh arrays every time.
+        """
+        try:
+            required = int(required_updates)
+        except Exception:
+            return
+        if required <= 0:
+            return
+
+        dtype = self.preallocate.dtype if data_dtype is None else np.dtype(data_dtype)
+        current = int(getattr(self._change_i_work, "shape", (0,))[0]) or 0
+        dtype_matches = (
+            self._new_data_work.dtype == dtype and self._old_data_work.dtype == dtype
+        )
+        if required <= current and dtype_matches:
+            return
+
+        new_size = max(required, max(1, current * 2))
+        self._change_i_work = np.empty(new_size, dtype=np.intp)
+        self._change_j_work = np.empty(new_size, dtype=np.intp)
+        self._new_data_work = np.empty(new_size, dtype=dtype)
+        self._old_data_work = np.empty(new_size, dtype=dtype)
 
     def ensure_preallocation(self, required_rows: int) -> None:
         """
@@ -125,6 +317,7 @@ class Tree(object):
         self.preallocate_midpoints = new_midpoints
 
         self.preallocation_step = int(new_size)
+        self._refresh_growth_work_caches()
 
         # Refresh views that commonly point into the preallocated buffers.
         try:
@@ -457,7 +650,7 @@ class Tree(object):
             'metadata': np.array([metadata], dtype=object),
             'parameters': np.array([params_dict], dtype=object),
             'data': np.asarray(self.data),  # TreeData as plain ndarray
-            'vessel_map': np.array([dict(self.vessel_map)], dtype=object),
+            'vessel_map': np.array([serialize_tree_map(self.vessel_map)], dtype=object),
         }
 
         if include_timing:

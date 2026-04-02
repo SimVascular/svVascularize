@@ -3,7 +3,7 @@ import os
 from copy import deepcopy
 from scipy.spatial import cKDTree
 from svv.tree.tree import Tree
-from svv.tree.data.data import TreeData
+from svv.tree.data.data import TreeData, TreeMap, serialize_tree_map
 from svv.tree.collision.tree_collision import tree_collision
 from svv.tree.utils.TreeManager import KDTreeManager, USearchTree
 from svv.forest.connect.geodesic import geodesic_constructor
@@ -570,7 +570,7 @@ class Forest(object):
                     # Store only the populated vessel table, not the full
                     # preallocated NaN buffer.
                     'data': trimmed_data,
-                    'vessel_map': dict(tree.vessel_map),
+                    'vessel_map': serialize_tree_map(tree.vessel_map),
                 }
                 if include_timing:
                     tree_dict['times'] = tree.times
