@@ -401,6 +401,60 @@ class Forest(object):
                 interp_xyz, interp_radii, interp_normals, all_points, all_radii, all_normals = export_spline(self.connections.tree_connections[i])
                 _ = write_splines(all_points, all_radii, outdir=outdir, name_prefix="{}".format(i))
 
+    def export_centerlines(self, points_per_unit_length: int = 100, **kwargs):
+        """
+        Export centerline geometry for every tree in the forest.
+
+        Parameters
+        ----------
+        points_per_unit_length : int, optional
+            Sampling density along each spline. Default is 100.
+
+        Returns
+        -------
+        result : CenterlineResult
+            A 2-tuple ``(centerlines, polys)`` for backward compatibility.
+            Access ``result.boundary_points`` for inlet/outlet metadata
+            (each dict also includes a ``tree_label`` key).
+        """
+        import pyvista
+
+        all_centerlines = None
+        all_polys = []
+        all_boundary_points = []
+
+        for net_idx in range(self.n_networks):
+            for tree_idx in range(self.n_trees_per_network[net_idx]):
+                tree = self.networks[net_idx][tree_idx]
+                if getattr(tree, "data", None) is None:
+                    continue
+                data_arr = numpy.asarray(tree.data)
+                if data_arr.ndim != 2 or data_arr.shape[0] == 0:
+                    continue
+
+                result = tree.export_centerlines(
+                    points_per_unit_length=points_per_unit_length, **kwargs
+                )
+                cl, polys = result
+                bp = getattr(result, 'boundary_points', [])
+                all_polys.extend(polys)
+
+                label = f"network{net_idx}_tree{tree_idx}"
+                for pt in bp:
+                    pt['tree_label'] = label
+                all_boundary_points.extend(bp)
+
+                if all_centerlines is None:
+                    all_centerlines = cl
+                else:
+                    all_centerlines = all_centerlines.merge(cl, merge_points=False)
+
+        if all_centerlines is None:
+            raise ValueError("Forest contains no trees with data to export.")
+
+        from svv.tree.tree import CenterlineResult
+        return CenterlineResult(all_centerlines, all_polys, all_boundary_points)
+
     def save(self, path: str, include_timing: bool = False):
         """
         Save this Forest to a .forest file.

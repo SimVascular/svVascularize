@@ -441,6 +441,38 @@ def build_centerlines(tree, points_per_unit_length=100):
         GlobalNodeId = numpy.array(GlobalNodeId)
         polys[ind].point_data['GlobalNodeId'] = GlobalNodeId
 
+    # ---- Label inlet / outlet boundary points ----
+    # Vessels that are parents of a daughter branch (appear as bif[1]).
+    parent_vessel_indices = {bif[1] for bif in bifurcation_point_ids}
+    # Terminal (outlet) vessels: those that are never a parent.
+    terminal_vessel_indices = set(range(len(polys))) - parent_vessel_indices
+
+    for ind in range(len(polys)):
+        # 0 = interior, 1 = inlet, 2 = outlet
+        bt = numpy.zeros(polys[ind].n_points, dtype=int)
+        # The very first point of polys[0] is the inlet (tree root).
+        if ind == 0:
+            bt[0] = 1
+        # The last point of every terminal vessel is an outlet.
+        if ind in terminal_vessel_indices:
+            bt[-1] = 2
+        polys[ind].point_data['BoundaryType'] = bt
+
+    # Collect boundary point coordinates + radii for convenience.
+    boundary_points = []
+    # Inlet: first point of root vessel.
+    boundary_points.append({
+        'type': 'inlet',
+        'point': numpy.array(polys[0].points[0]),
+        'radius': float(polys[0].point_data['MaximumInscribedSphereRadius'][0]),
+    })
+    for ind in sorted(terminal_vessel_indices):
+        boundary_points.append({
+            'type': 'outlet',
+            'point': numpy.array(polys[ind].points[-1]),
+            'radius': float(polys[ind].point_data['MaximumInscribedSphereRadius'][-1]),
+        })
+
     # Merge and Connect Lines
     # Precompute cumulative point counts for index mapping
     cumulative_points = [0]
@@ -479,4 +511,4 @@ def build_centerlines(tree, points_per_unit_length=100):
         new_line = [2, closest_pt_id, closest_next_id]
         centerlines_all.lines = numpy.hstack((centerlines_all.lines, numpy.array(new_line)))
 
-    return centerlines_all, polys
+    return centerlines_all, polys, boundary_points

@@ -545,10 +545,11 @@ class VascularizeGUI(QMainWindow):
         self.action_save_vascular.triggered.connect(self.save_vascular_object_dialog)
         self.file_toolbar.addAction(self.action_save_vascular)
 
-        # Export action
+        # Export action – opens a menu with all available export options.
         self.action_export = QAction(CADIcons.get_icon('export'), "Export", self)
         self.action_export.setStatusTip("Export generated vasculature")
         self.action_export.setToolTip("Export Results")
+        self.action_export.triggered.connect(self._show_export_menu)
         self.file_toolbar.addAction(self.action_export)
 
         self.file_toolbar.addSeparator()
@@ -1272,6 +1273,35 @@ class VascularizeGUI(QMainWindow):
             )
 
     # ---- Fabricate / Simulation exports ----
+
+    def _show_export_menu(self):
+        """Show a popup menu with all export options (toolbar Export button)."""
+        menu = QMenu(self)
+
+        act_centerlines = menu.addAction("Export Centerlines...")
+        act_centerlines.triggered.connect(self.export_centerlines_dialog)
+
+        act_solids = menu.addAction("Export Solids...")
+        act_solids.triggered.connect(self.export_solids_dialog)
+
+        act_splines = menu.addAction("Export Splines...")
+        act_splines.triggered.connect(self.export_splines_dialog)
+
+        menu.addSeparator()
+
+        act_0d = menu.addAction("Export 0D Simulation...")
+        act_0d.triggered.connect(self.export_0d_simulation_dialog)
+
+        act_3d = menu.addAction("Export 3D Simulation...")
+        act_3d.triggered.connect(self.export_3d_simulation_dialog)
+
+        # Show the menu below the Export toolbar button.
+        btn = self.file_toolbar.widgetForAction(self.action_export)
+        if btn is not None:
+            menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+        else:
+            menu.exec(self.cursor().pos())
+
     def _require_synthetic_object(self):
         """
         Return the current synthetic object (Tree or Forest) or show an error.
@@ -1316,6 +1346,15 @@ class VascularizeGUI(QMainWindow):
         points_spin.setToolTip("Sampling density along centerlines in points per unit length.")
         form.addRow("Points per unit length:", points_spin)
 
+        boundary_cb = QCheckBox("X-CAVATE Export boundary points (inlet/outlet)")
+        boundary_cb.setChecked(True)
+        boundary_cb.setToolTip(
+            "Write a companion file with labeled inlet and outlet coordinates.\n"
+            "The inlet is the root (start) point of the tree.\n"
+            "Outlets are the terminal (leaf) vessel endpoints."
+        )
+        form.addRow("", boundary_cb)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
@@ -1329,6 +1368,7 @@ class VascularizeGUI(QMainWindow):
             return
 
         points_per_unit_length = points_spin.value()
+        export_boundary = boundary_cb.isChecked()
 
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -1341,17 +1381,43 @@ class VascularizeGUI(QMainWindow):
 
         try:
             import pyvista as pv
+            from pathlib import Path as _Path
+
+            boundary_points = []
+
             if hasattr(obj, "export_centerlines"):
-                centerlines, _ = obj.export_centerlines(points_per_unit_length=points_per_unit_length)
-                if isinstance(centerlines, tuple):
-                    centerlines = centerlines[0]
+                result = obj.export_centerlines(points_per_unit_length=points_per_unit_length)
+                centerlines = result[0]
+                boundary_points = getattr(result, 'boundary_points', [])
             else:
                 raise ValueError("Selected object does not support centerline export.")
             if isinstance(centerlines, pv.PolyData):
                 centerlines.save(file_path)
             else:
                 raise ValueError("Centerline export did not return a PyVista PolyData object.")
-            self.update_status(f"Centerlines exported to {file_path}")
+
+            # Write companion boundary points file.
+            if export_boundary:
+                import numpy as np
+                bp_path = _Path(file_path).with_name(
+                    _Path(file_path).stem + "_inlet_outlet.txt"
+                )
+                inlets = [bp for bp in boundary_points if bp['type'] == 'inlet']
+                outlets = [bp for bp in boundary_points if bp['type'] == 'outlet']
+                with bp_path.open("w", encoding="utf-8") as f:
+                    f.write("inlet\n")
+                    for bp in inlets:
+                        p = np.asarray(bp['point'])
+                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
+                    f.write("outlet\n")
+                    for bp in outlets:
+                        p = np.asarray(bp['point'])
+                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
+                self.update_status(
+                    f"Centerlines exported to {file_path}  |  boundary points → {bp_path.name}"
+                )
+            else:
+                self.update_status(f"Centerlines exported to {file_path}")
         except Exception as e:
             self._record_telemetry(e, action="export_centerlines")
             QMessageBox.critical(
@@ -2434,6 +2500,9 @@ class VascularizeGUI(QMainWindow):
             return
 
         try:
+            import numpy as np
+            from pathlib import Path as _Path
+
             written = export_spline_files(
                 obj,
                 file_path,
@@ -2443,6 +2512,45 @@ class VascularizeGUI(QMainWindow):
                 tree_root_role=tree_root_role,
                 inlet_tree_indices_by_network=inlet_tree_indices_by_network,
             )
+
+            # Write companion boundary points file when requested.
+            if export_boundary and written:
+                def _get_start_point(tree):
+                    data = np.asarray(tree.data)
+                    if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] < 6:
+                        return None
+                    root_idx = np.where(np.isnan(data[:, 17]))[0]
+                    if len(root_idx) == 0:
+                        return None
+                    return data[root_idx[0], 0:3].copy()
+
+                inlets, outlets = [], []
+                if hasattr(obj, "networks"):
+                    for network in (getattr(obj, "networks", []) or []):
+                        for i in range(0, len(network), 2):
+                            pt = _get_start_point(network[i])
+                            if pt is not None:
+                                inlets.append(pt)
+                            if i + 1 < len(network):
+                                pt = _get_start_point(network[i + 1])
+                                if pt is not None:
+                                    outlets.append(pt)
+                else:
+                    pt = _get_start_point(obj)
+                    if pt is not None:
+                        inlets.append(pt)
+
+                bp_path = _Path(written[0]).with_name(
+                    _Path(written[0]).stem + "_inlet_outlet.txt"
+                )
+                with bp_path.open("w", encoding="utf-8") as f:
+                    f.write("inlet\n")
+                    for p in inlets:
+                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
+                    f.write("outlet\n")
+                    for p in outlets:
+                        f.write(f"{p[0]:.2f}, {p[1]:.2f}, {p[2]:.2f}\n")
+
             if len(written) == 1:
                 if export_inlet_outlet_roots:
                     sidecar_name = f"{Path(written[0]).stem}_inlet_outlet.txt"

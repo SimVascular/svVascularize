@@ -39,8 +39,7 @@ class CatmullRomCurve(BaseCurve, ABC):
         """
         Evaluate the Catmull–Rom spline at param values t in [0,1].
 
-        We subdivide [0,1] into (N) segments if closed, or (N-1) if open,
-        and each segment is parameterized in [0,1] internally.
+        Uses vectorized operations to evaluate all t values at once per segment.
 
         Parameters
         ----------
@@ -59,32 +58,33 @@ class CatmullRomCurve(BaseCurve, ABC):
         if n_segs < 1:
             raise ValueError("Not enough segments to evaluate.")
 
-        # Prepare output
-        out = np.zeros((len(t_values), self.dimension))
+        # Clamp and map to segment space
+        t_clamped = np.clip(t_values, 0.0, 1.0)
+        scaled = t_clamped * n_segs
+        seg_idx = np.floor(scaled).astype(int)
+        seg_idx = np.clip(seg_idx, 0, n_segs - 1)
+        local_u = scaled - seg_idx
 
-        for idx, t in enumerate(t_values):
-            # Clamp t into [0,1]
-            if t < 0.0:
-                t = 0.0
-            if t > 1.0:
-                t = 1.0
+        # Process each unique segment to batch evaluations
+        out = np.empty((len(t_values), self.dimension))
+        unique_segs = np.unique(seg_idx)
 
-            # Map [0,1] -> [0, n_segs)
-            scaled = t * n_segs
-            i = int(np.floor(scaled))
-            # Handle edge case at t=1 => i might be == n_segs
-            if i == n_segs:
-                i = n_segs - 1
-            local_u = scaled - i  # local param in [0,1]
+        for s in unique_segs:
+            mask = seg_idx == s
+            u_vals = local_u[mask]
 
-            # For Catmull–Rom, each segment needs 4 points: p_{i-1}, p_i, p_{i+1}, p_{i+2}
-            # We'll fetch them with boundary conditions
-            p0 = self._get_ctrl_point(i - 1)
-            p1 = self._get_ctrl_point(i)
-            p2 = self._get_ctrl_point(i + 1)
-            p3 = self._get_ctrl_point(i + 2)
+            p0 = self._get_ctrl_point(s - 1)
+            p1 = self._get_ctrl_point(s)
+            p2 = self._get_ctrl_point(s + 1)
+            p3 = self._get_ctrl_point(s + 2)
 
-            out[idx] = self._catmull_rom_segment(p0, p1, p2, p3, local_u)
+            # Vectorized Catmull-Rom evaluation for all u values in this segment
+            u2 = u_vals * u_vals
+            u3 = u2 * u_vals
+            a = -p0 + p2
+            b = 2 * p0 - 5 * p1 + 4 * p2 - p3
+            c = -p0 + 3 * p1 - 3 * p2 + p3
+            out[mask] = 0.5 * (2 * p1 + np.outer(u_vals, a) + np.outer(u2, b) + np.outer(u3, c))
 
         return out
 

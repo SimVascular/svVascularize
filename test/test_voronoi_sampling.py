@@ -14,8 +14,15 @@ def _make_tet_mesh(points: np.ndarray, tets: np.ndarray) -> pv.UnstructuredGrid:
 
 
 def _dummy_domain_with_mesh(mesh: pv.UnstructuredGrid) -> Domain:
+    from scipy.spatial import cKDTree
     dom = Domain(np.zeros((1, 3), dtype=float))
+    mesh = mesh.compute_cell_sizes()
+    mesh.cell_data['Normalized_Volume'] = mesh.cell_data['Volume'] / sum(mesh.cell_data['Volume'])
     dom.mesh = mesh
+    dom.mesh_tree = cKDTree(mesh.cell_centers().points, leafsize=4)
+    dom.all_mesh_cells = np.arange(mesh.n_cells, dtype=np.int64)
+    dom.cumulative_probability = np.cumsum(mesh.cell_data['Normalized_Volume'])
+    dom.random_generator = np.random.default_rng(42)
     # Provide a cheap implicit evaluator so voronoi sampling can filter by implicit_range.
     dom.evaluate_fast = lambda pts, **_: -0.5 * np.ones((np.asarray(pts).shape[0], 1), dtype=float)
     return dom
