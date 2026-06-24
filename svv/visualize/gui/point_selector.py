@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QListWidget, QListWidgetItem,
     QLabel, QLineEdit, QCheckBox,
-    QDoubleSpinBox, QComboBox, QSizePolicy, QScrollArea
+    QDoubleSpinBox, QComboBox, QSizePolicy, QScrollArea, QGridLayout
 )
 from PySide6.QtCore import Signal, Qt, QSignalBlocker
 from svv.visualize.gui.theme import CADTheme, CADIcons
@@ -40,6 +40,15 @@ class PointSelectorWidget(QWidget):
         # per-network tree count until the ParameterPanel sets explicit values.
         self._n_trees_per_network = [max(1, self.tree_combo.count())]
         self.set_network_count(1)
+
+    @staticmethod
+    def _configure_combo(combo: QComboBox, *, min_chars: int = 10, max_width: int = 180):
+        """Keep combo boxes useful in narrow docked layouts."""
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(min_chars)
+        combo.setMinimumWidth(min(120, max_width))
+        combo.setMaximumWidth(max_width)
 
     # ---- Public helpers ----
     def set_network_count(self, count: int):
@@ -140,25 +149,27 @@ class PointSelectorWidget(QWidget):
 
 
         # Current network/tree selection
-        selection_layout = QHBoxLayout()
-        selection_layout.addWidget(QLabel("Network:"))
+        selection_layout = QGridLayout()
+        selection_layout.setContentsMargins(0, 0, 0, 0)
+        selection_layout.setHorizontalSpacing(6)
+        selection_layout.setVerticalSpacing(4)
+        selection_layout.addWidget(QLabel("Network:"), 0, 0)
         self.network_combo = QComboBox()
-        self.network_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.network_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._configure_combo(self.network_combo)
         self.network_combo.setMaxVisibleItems(100)
         self.network_combo.addItem("Network 0")
         self.network_combo.currentIndexChanged.connect(self._on_network_selection_changed)
-        selection_layout.addWidget(self.network_combo)
+        selection_layout.addWidget(self.network_combo, 0, 1)
 
-        selection_layout.addWidget(QLabel("Tree:"))
+        selection_layout.addWidget(QLabel("Tree:"), 1, 0)
         self.tree_combo = QComboBox()
-        self.tree_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.tree_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._configure_combo(self.tree_combo)
         self.tree_combo.setMaxVisibleItems(100)
         self.tree_combo.addItem("Tree 0")
         self.tree_combo.addItem("Tree 1")
         self.tree_combo.currentIndexChanged.connect(self._on_tree_changed)
-        selection_layout.addWidget(self.tree_combo)
+        selection_layout.addWidget(self.tree_combo, 1, 1)
+        selection_layout.setColumnStretch(1, 1)
         group_layout.addLayout(selection_layout)
 
         # Point list
@@ -195,6 +206,7 @@ class PointSelectorWidget(QWidget):
         coord_layout = QHBoxLayout()
         coord_layout.addWidget(QLabel("Position:"))
         self.coord_label = QLabel("(0.0, 0.0, 0.0)")
+        self.coord_label.setWordWrap(True)
         coord_layout.addWidget(self.coord_label)
         coord_layout.addStretch()
         details_layout.addLayout(coord_layout)
@@ -206,31 +218,34 @@ class PointSelectorWidget(QWidget):
         details_layout.addWidget(self.use_direction_cb)
 
         # Direction inputs
-        direction_layout = QHBoxLayout()
-        direction_layout.addWidget(QLabel("Direction:"))
+        direction_layout = QGridLayout()
+        direction_layout.setContentsMargins(0, 0, 0, 0)
+        direction_layout.setHorizontalSpacing(6)
+        direction_layout.setVerticalSpacing(4)
         self.dir_x = QDoubleSpinBox()
         self.dir_x.setRange(-1.0, 1.0)
         self.dir_x.setSingleStep(0.1)
         self.dir_x.setDecimals(3)
         self.dir_x.valueChanged.connect(self._on_direction_changed)
-        direction_layout.addWidget(QLabel("X:"))
-        direction_layout.addWidget(self.dir_x)
+        direction_layout.addWidget(QLabel("X:"), 0, 0)
+        direction_layout.addWidget(self.dir_x, 0, 1)
 
         self.dir_y = QDoubleSpinBox()
         self.dir_y.setRange(-1.0, 1.0)
         self.dir_y.setSingleStep(0.1)
         self.dir_y.setDecimals(3)
         self.dir_y.valueChanged.connect(self._on_direction_changed)
-        direction_layout.addWidget(QLabel("Y:"))
-        direction_layout.addWidget(self.dir_y)
+        direction_layout.addWidget(QLabel("Y:"), 1, 0)
+        direction_layout.addWidget(self.dir_y, 1, 1)
 
         self.dir_z = QDoubleSpinBox()
         self.dir_z.setRange(-1.0, 1.0)
         self.dir_z.setSingleStep(0.1)
         self.dir_z.setDecimals(3)
         self.dir_z.valueChanged.connect(self._on_direction_changed)
-        direction_layout.addWidget(QLabel("Z:"))
-        direction_layout.addWidget(self.dir_z)
+        direction_layout.addWidget(QLabel("Z:"), 2, 0)
+        direction_layout.addWidget(self.dir_z, 2, 1)
+        direction_layout.setColumnStretch(1, 1)
 
         details_layout.addLayout(direction_layout)
 
@@ -245,7 +260,8 @@ class PointSelectorWidget(QWidget):
         group_layout.addWidget(details_group)
 
         # Delete and Clear buttons
-        action_layout = QHBoxLayout()
+        action_layout = QVBoxLayout()
+        action_layout.setSpacing(6)
         self.delete_btn = QPushButton("Delete Selected")
         self.delete_btn.clicked.connect(self._delete_selected)
         self.delete_btn.setObjectName("dangerButton")
@@ -594,10 +610,10 @@ class PointSelectorWidget(QWidget):
         """Refresh all point and direction visualizations."""
         if self.parent_gui:
             vtk_widget = self.parent_gui.vtk_widget
-            vtk_widget.clear()
-
-            for i, point_data in enumerate(self.points):
-                self._visualize_point(point_data, i)
+            with vtk_widget.batch_render():
+                vtk_widget.clear()
+                for i, point_data in enumerate(self.points):
+                    self._visualize_point(point_data, i)
 
     def get_configuration(self):
         """

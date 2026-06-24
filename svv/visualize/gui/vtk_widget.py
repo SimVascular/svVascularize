@@ -4,6 +4,7 @@ VTK/PyVista widget for 3D domain visualization.
 import os
 import platform
 import sys
+from contextlib import contextmanager
 
 # macOS: force layer-backed views to avoid Qt/VTK view initialization deadlocks.
 if sys.platform == 'darwin':
@@ -478,7 +479,7 @@ class VTKWidget(QWidget):
         self._scale_bar_actor = None
         self._scale_bar_visible = True
         # Domain edge visibility state
-        self._domain_edges_visible = True
+        self._domain_edges_visible = False
         # Grid visibility state
         self._grid_visible = False
         self._grid_actor = None
@@ -517,6 +518,14 @@ class VTKWidget(QWidget):
             "border: 1px solid rgba(122,155,192,180); padding: 6px 10px; border-radius: 6px;"
         )
         self._hud.hide()
+
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._perform_scheduled_render)
+        self._render_batch_depth = 0
+        self._render_pending = False
+        self._render_batch_delay_ms = 0
+        self._render_in_progress = False
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -785,18 +794,92 @@ class VTKWidget(QWidget):
         self._plotter_init_failed = True
         self._plotter_init_in_progress = False
 
-    def request_render(self, *, delay_ms=None):
-        """Render the plotter and refresh the compatibility viewport when needed."""
+    def request_render(self, *, delay_ms=None, immediate=False):
+        """Schedule a coalesced plotter render.
+
+        Most GUI interactions can wait until Qt returns to the event loop. Using
+        a single-shot timer collapses bursts of actor/style changes into one VTK
+        render, which keeps dense tree and forest updates responsive.
+        """
         if not self.plotter:
             return
+        delay_ms = 0 if delay_ms is None else max(0, int(delay_ms))
+
+        if self._render_batch_depth > 0:
+            was_pending = self._render_pending
+            self._render_pending = True
+            if not was_pending or delay_ms < self._render_batch_delay_ms:
+                self._render_batch_delay_ms = delay_ms
+            return
+
+        if immediate:
+            if self._render_timer.isActive():
+                self._render_timer.stop()
+            self._render_now()
+            return
+
+        self._schedule_render(delay_ms)
+
+    def _schedule_render(self, delay_ms=0):
+        """Start or tighten the pending render timer."""
+        delay_ms = max(0, int(delay_ms))
+        if self._render_timer.isActive():
+            remaining = self._render_timer.remainingTime()
+            if remaining >= 0 and remaining <= delay_ms:
+                return
+            self._render_timer.stop()
+        self._render_timer.start(delay_ms)
+
+    def _perform_scheduled_render(self):
+        """Timer callback for deferred rendering."""
+        if self._render_batch_depth > 0:
+            self._render_pending = True
+            return
+        self._render_now()
+
+    def _render_now(self):
+        """Render immediately, guarding against recursive render requests."""
+        if not self.plotter:
+            self._render_pending = False
+            return
+        if self._render_in_progress:
+            self._render_pending = True
+            return
+        self._render_in_progress = True
         try:
             self.plotter.render()
         except Exception:
-            return
+            pass
+        finally:
+            self._render_in_progress = False
         if self._offscreen_mode and self._blit_widget is not None:
-            if delay_ms is None:
-                delay_ms = 0
-            self._blit_widget.schedule_blit(delay_ms=delay_ms)
+            self._blit_widget.schedule_blit(delay_ms=0)
+        if self._render_pending and self._render_batch_depth == 0:
+            self._render_pending = False
+            self._schedule_render(0)
+
+    @contextmanager
+    def batch_render(self, delay_ms=0):
+        """Defer render requests until a group of scene mutations completes."""
+        self._render_batch_depth += 1
+        previous_delay = self._render_batch_delay_ms
+        if self._render_batch_depth == 1:
+            self._render_batch_delay_ms = max(0, int(delay_ms))
+        try:
+            yield self
+        finally:
+            self._render_batch_depth = max(0, self._render_batch_depth - 1)
+            if self._render_batch_depth == 0:
+                should_render = self._render_pending
+                pending_delay = self._render_batch_delay_ms
+                self._render_pending = False
+                self._render_batch_delay_ms = previous_delay
+                if should_render:
+                    self.request_render(delay_ms=pending_delay)
+
+    def show_hud(self, message: str, duration_ms: int = 1400):
+        """Public wrapper for transient viewport messages."""
+        self._show_hud(message, duration_ms=duration_ms)
 
     def _batched_vessel_sides(self) -> int:
         """Return the tube resolution used for batched vessel meshes."""
@@ -868,6 +951,12 @@ class VTKWidget(QWidget):
         """
         if getattr(self, '_blit_widget', None) is not None:
             self._blit_widget.stop()
+
+        if hasattr(self, '_render_timer') and self._render_timer:
+            try:
+                self._render_timer.stop()
+            except Exception:
+                pass
 
         # Stop scale bar update timer
         if hasattr(self, '_scale_bar_timer') and self._scale_bar_timer:
@@ -1086,6 +1175,35 @@ class VTKWidget(QWidget):
         if hasattr(self, '_scale_bar_widget') and self._scale_bar_widget:
             self._scale_bar_widget.set_unit_label(unit_label)
 
+    @staticmethod
+    def _prepare_domain_surface_mesh(surface):
+        """Return a display mesh with smooth point normals for softer lighting."""
+        if surface is None:
+            return None
+        try:
+            return surface.compute_normals(
+                point_normals=True,
+                cell_normals=False,
+                split_vertices=False,
+                consistent_normals=True,
+                auto_orient_normals=True,
+                feature_angle=180.0,
+                inplace=False,
+            )
+        except TypeError:
+            try:
+                return surface.compute_normals(
+                    point_normals=True,
+                    cell_normals=False,
+                    split_vertices=False,
+                    feature_angle=180.0,
+                    inplace=False,
+                )
+            except Exception:
+                return surface
+        except Exception:
+            return surface
+
     def set_domain(self, domain):
         """
         Set and visualize the domain.
@@ -1107,19 +1225,25 @@ class VTKWidget(QWidget):
         if hasattr(domain, 'boundary') and domain.boundary is not None:
             surface_color = CADTheme.get_color('viewport', 'domain-surface')
             edge_color = CADTheme.get_color('viewport', 'domain-edge')
+            display_boundary = self._prepare_domain_surface_mesh(domain.boundary)
             self.domain_actor = self.plotter.add_mesh(
-                domain.boundary,
+                display_boundary,
                 color=surface_color,
                 opacity=0.35,
                 show_edges=self._domain_edges_visible,
                 edge_color=edge_color,
                 line_width=1,
-                specular=0.15,
+                lighting=True,
+                ambient=0.45,
+                diffuse=0.55,
+                specular=0.05,
+                specular_power=8,
                 smooth_shading=True,
                 name='domain'
             )
+            self._apply_domain_actor_style()
             if self._offscreen_mode and self._blit_widget is not None:
-                self._blit_widget._pickable_meshes = [domain.boundary]
+                self._blit_widget._pickable_meshes = [display_boundary or domain.boundary]
 
         # Update scale bar unit if domain has unit info
         if hasattr(domain, 'unit') and domain.unit:
@@ -1459,10 +1583,11 @@ class VTKWidget(QWidget):
 
     def clear(self):
         """Clear all visualizations except the domain."""
-        self.clear_points()
-        self.clear_directions()
-        self.clear_trees()
-        self.clear_connections()
+        with self.batch_render():
+            self.clear_points()
+            self.clear_directions()
+            self.clear_trees()
+            self.clear_connections()
 
     def reset_camera(self):
         """Reset the camera to show the full domain."""
@@ -1502,7 +1627,41 @@ class VTKWidget(QWidget):
                 self.domain_actor.GetProperty().SetEdgeVisibility(1 if self._domain_edges_visible else 0)
             except Exception:
                 pass
+        self._apply_domain_actor_style()
         self.request_render()
+
+    def _apply_domain_actor_style(self):
+        """Use soft lighting that preserves depth without faceted pseudo-edges."""
+        if self.domain_actor is None:
+            return
+        try:
+            prop = self.domain_actor.GetProperty()
+        except Exception:
+            return
+
+        try:
+            prop.SetInterpolationToPhong()
+        except Exception:
+            pass
+
+        try:
+            prop.LightingOn()
+        except Exception:
+            try:
+                prop.SetLighting(1)
+            except Exception:
+                pass
+
+        for setter, value in (
+            ("SetAmbient", 0.45),
+            ("SetDiffuse", 0.55),
+            ("SetSpecular", 0.05),
+            ("SetSpecularPower", 8.0),
+        ):
+            try:
+                getattr(prop, setter)(value)
+            except Exception:
+                pass
 
     def toggle_grid(self):
         """Toggle the visibility of the 3D grid."""
@@ -1566,45 +1725,46 @@ class VTKWidget(QWidget):
         if not self.plotter:
             return
 
-        self.clear_trees()
-        self.clear_connections()
+        with self.batch_render():
+            self.clear_trees()
+            self.clear_connections()
 
-        colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'cyan', 'magenta']
+            colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'cyan', 'magenta']
 
-        has_conn = getattr(forest, 'connections', None) is not None and \
-            getattr(forest.connections, 'tree_connections', None)
+            has_conn = getattr(forest, 'connections', None) is not None and \
+                getattr(forest.connections, 'tree_connections', None)
 
-        if has_conn:
-            for net_idx, tree_conn in enumerate(forest.connections.tree_connections):
-                # Trees within this network
-                for tree_idx, tree in enumerate(tree_conn.connected_network):
-                    color = colors[(net_idx + tree_idx) % len(colors)]
-                    self.add_tree(
-                        tree,
-                        color=color,
-                        label=f"forest_{net_idx}_{tree_idx}",
-                        group_id=("forest", net_idx, tree_idx),
-                    )
-                # Connection vessels between trees in this network
-                for tree_idx, vessel_list in enumerate(tree_conn.vessels):
-                    color = colors[tree_idx % len(colors)]
-                    for conn_idx, vessel in enumerate(vessel_list):
-                        self.add_connection_vessels(
-                            vessel,
+            if has_conn:
+                for net_idx, tree_conn in enumerate(forest.connections.tree_connections):
+                    # Trees within this network
+                    for tree_idx, tree in enumerate(tree_conn.connected_network):
+                        color = colors[(net_idx + tree_idx) % len(colors)]
+                        self.add_tree(
+                            tree,
                             color=color,
-                            label=f"conn_{net_idx}_{tree_idx}_{conn_idx}",
-                            group_id=("conn", net_idx, tree_idx, conn_idx),
+                            label=f"forest_{net_idx}_{tree_idx}",
+                            group_id=("forest", net_idx, tree_idx),
                         )
-        else:
-            for net_idx, network in enumerate(forest.networks):
-                for tree_idx, tree in enumerate(network):
-                    color = colors[(net_idx + tree_idx) % len(colors)]
-                    self.add_tree(
-                        tree,
-                        color=color,
-                        label=f"forest_{net_idx}_{tree_idx}",
-                        group_id=("forest", net_idx, tree_idx),
-                    )
+                    # Connection vessels between trees in this network
+                    for tree_idx, vessel_list in enumerate(tree_conn.vessels):
+                        color = colors[tree_idx % len(colors)]
+                        for conn_idx, vessel in enumerate(vessel_list):
+                            self.add_connection_vessels(
+                                vessel,
+                                color=color,
+                                label=f"conn_{net_idx}_{tree_idx}_{conn_idx}",
+                                group_id=("conn", net_idx, tree_idx, conn_idx),
+                            )
+            else:
+                for net_idx, network in enumerate(forest.networks):
+                    for tree_idx, tree in enumerate(network):
+                        color = colors[(net_idx + tree_idx) % len(colors)]
+                        self.add_tree(
+                            tree,
+                            color=color,
+                            label=f"forest_{net_idx}_{tree_idx}",
+                            group_id=("forest", net_idx, tree_idx),
+                        )
 
     def _on_point_picked(self, point):
         """

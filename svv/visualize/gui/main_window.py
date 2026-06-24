@@ -467,6 +467,7 @@ class VascularizeGUI(QMainWindow):
         self._zerod_stderr_buffer = ""
         self._constrained_tissue_preview_actors = []
         self._last_constrained_tissue_simulation = None
+        self._solution_inspector = None
 
         # Persistent layout
         self.settings = QSettings("SimVascular", "svVascularize")
@@ -736,9 +737,7 @@ class VascularizeGUI(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.info_dock)
         self.info_dock.hide()  # Hidden by default
 
-        # Solution inspector panel (dockable; created up front but hidden)
-        from svv.visualize.gui.solution_inspector import SolutionInspectorWidget
-
+        # Solution inspector panel (dockable; heavy contents are created lazily)
         self.solution_dock = QDockWidget("Solution Inspector", self)
         self.solution_dock.setObjectName("SolutionInspectorDock")
         self.solution_dock.setAllowedAreas(
@@ -748,10 +747,14 @@ class VascularizeGUI(QMainWindow):
         self.solution_dock.setFeatures(
             QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
         )
-        self.solution_inspector = SolutionInspectorWidget(self.solution_dock)
-        self.solution_dock.setWidget(self.solution_inspector)
+        placeholder = QLabel("Solution Inspector will open when needed.")
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setWordWrap(True)
+        placeholder.setStyleSheet(f"padding: 24px; color: {CADTheme.get_color('text', 'secondary')};")
+        self.solution_dock.setWidget(placeholder)
         self.addDockWidget(Qt.RightDockWidgetArea, self.solution_dock)
         self.solution_dock.hide()
+        self.solution_dock.visibilityChanged.connect(self._on_solution_dock_visibility_changed)
 
     def _create_menu_bar(self):
         """Create the menu bar."""
@@ -786,7 +789,7 @@ class VascularizeGUI(QMainWindow):
         # Domain edge toggle (View menu only)
         self.action_toggle_domain_edges = QAction("Domain Edges", self)
         self.action_toggle_domain_edges.setCheckable(True)
-        self.action_toggle_domain_edges.setChecked(True)
+        self.action_toggle_domain_edges.setChecked(False)
         self.action_toggle_domain_edges.setStatusTip("Toggle domain edge display")
         self.action_toggle_domain_edges.setToolTip("Toggle Domain Edges")
         self.action_toggle_domain_edges.triggered.connect(
@@ -995,6 +998,35 @@ class VascularizeGUI(QMainWindow):
 
         self.update_status("Domain loaded successfully")
         self.update_object_count()
+
+    @property
+    def solution_inspector(self):
+        """Return the lazily created Solution Inspector widget."""
+        return self._ensure_solution_inspector()
+
+    def _ensure_solution_inspector(self):
+        """Create the Solution Inspector the first time it is actually needed."""
+        if self._solution_inspector is not None:
+            return self._solution_inspector
+        if not hasattr(self, "solution_dock") or self.solution_dock is None:
+            return None
+
+        from svv.visualize.gui.solution_inspector import SolutionInspectorWidget
+
+        old_widget = self.solution_dock.widget()
+        self._solution_inspector = SolutionInspectorWidget(self.solution_dock)
+        self.solution_dock.setWidget(self._solution_inspector)
+        if old_widget is not None:
+            try:
+                old_widget.deleteLater()
+            except Exception:
+                pass
+        return self._solution_inspector
+
+    def _on_solution_dock_visibility_changed(self, visible: bool):
+        """Instantiate the inspector when users open the dock from the View menu."""
+        if visible:
+            self._ensure_solution_inspector()
 
     def load_domain_dialog(self):
         """Open file dialog to load domain."""
@@ -2400,7 +2432,7 @@ class VascularizeGUI(QMainWindow):
         pvd_path = os.path.join(export_path, "timeseries", "timeseries.pvd")
         if not os.path.isfile(pvd_path):
             return None
-        inspector = getattr(self, "solution_inspector", None)
+        inspector = self._ensure_solution_inspector()
         if inspector is None:
             return None
         self._show_solution_inspector()
@@ -2684,6 +2716,16 @@ class VascularizeGUI(QMainWindow):
         """Update status bar message."""
         self.status_message.setText(message)
 
+    def show_toast(self, message: str, duration_ms: int = 1800):
+        """Show a non-blocking status/HUD message."""
+        self.update_status(message)
+        vtk_widget = getattr(self, "vtk_widget", None)
+        if vtk_widget is not None and hasattr(vtk_widget, "show_hud"):
+            try:
+                vtk_widget.show_hud(message, duration_ms=duration_ms)
+            except Exception:
+                pass
+
     def log_output(self, message: str):
         """Append a message to the output console."""
         if hasattr(self, "output_console") and self.output_console:
@@ -2743,6 +2785,7 @@ class VascularizeGUI(QMainWindow):
     def _show_solution_inspector(self):
         """Show the Solution Inspector dockable panel."""
         if hasattr(self, "solution_dock") and self.solution_dock is not None:
+            self._ensure_solution_inspector()
             self.solution_dock.show()
             self.solution_dock.raise_()
 
@@ -2927,9 +2970,9 @@ class VascularizeGUI(QMainWindow):
                 self.vtk_widget.shutdown()
             except Exception:
                 pass
-        if hasattr(self, "solution_inspector") and self.solution_inspector is not None:
+        if getattr(self, "_solution_inspector", None) is not None:
             try:
-                self.solution_inspector.shutdown()
+                self._solution_inspector.shutdown()
             except Exception:
                 pass
 

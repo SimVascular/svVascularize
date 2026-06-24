@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QSpinBox, QDoubleSpinBox,
     QComboBox, QCheckBox, QScrollArea, QFormLayout,
     QMessageBox, QProgressDialog, QSizePolicy,
-    QToolButton, QToolTip
+    QToolButton, QToolTip, QGridLayout
 )
 import numpy as np
 import threading
@@ -139,6 +139,38 @@ _PARAM_DESCRIPTIONS = {
 }
 
 
+class CollapsibleGroupBox(QGroupBox):
+    """Checkable group box that hides its contents when collapsed."""
+
+    def __init__(self, title: str, checked: bool = True, parent=None):
+        super().__init__(title, parent)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.toggled.connect(self._set_content_visible)
+
+    def setLayout(self, layout):
+        super().setLayout(layout)
+        QTimer.singleShot(0, lambda: self._set_content_visible(self.isChecked()))
+
+    def _set_content_visible(self, visible: bool):
+        layout = self.layout()
+        if layout is None:
+            return
+        for i in range(layout.count()):
+            self._set_item_visible(layout.itemAt(i), visible)
+
+    def _set_item_visible(self, item, visible: bool):
+        if item is None:
+            return
+        widget = item.widget()
+        if widget is not None:
+            widget.setVisible(visible)
+        child_layout = item.layout()
+        if child_layout is not None:
+            for i in range(child_layout.count()):
+                self._set_item_visible(child_layout.itemAt(i), visible)
+
+
 class ParameterPanel(QWidget):
     """
     Widget for configuring Tree and Forest generation parameters.
@@ -234,6 +266,23 @@ class ParameterPanel(QWidget):
         except Exception:
             pass
 
+    @staticmethod
+    def _configure_combo(combo: QComboBox, *, min_chars: int = 12, max_width: int = 220):
+        """Keep combo boxes from expanding docks beyond useful widths."""
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(min_chars)
+        combo.setMinimumWidth(min(120, max_width))
+        combo.setMaximumWidth(max_width)
+
+    @staticmethod
+    def _configure_form(form: QFormLayout):
+        """Use compact wrapping forms that behave well in narrow docks."""
+        form.setSpacing(10)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setLabelAlignment(Qt.AlignLeft)
+
     def _init_ui(self):
         """Initialize the user interface."""
         layout = QVBoxLayout()
@@ -258,8 +307,7 @@ class ParameterPanel(QWidget):
         mode_group.setLayout(mode_layout)
 
         self.mode_combo = QComboBox()
-        self.mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._configure_combo(self.mode_combo, min_chars=16, max_width=240)
         self.mode_combo.addItem("Tree (single)")
         self.mode_combo.addItem("Forest (multiple)")
         self.mode_combo.setMaxVisibleItems(100)
@@ -272,41 +320,43 @@ class ParameterPanel(QWidget):
         # Tree parameters
         tree_params_group = QGroupBox("Tree Parameters")
         tree_form = QFormLayout()
-        tree_form.setSpacing(10)
-        tree_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._configure_form(tree_form)
         tree_params_group.setLayout(tree_form)
 
         # Unit system selection (dropdowns for base units)
         unit_row = QWidget()
-        unit_layout = QHBoxLayout(unit_row)
+        unit_layout = QGridLayout(unit_row)
         unit_layout.setContentsMargins(0, 0, 0, 0)
-        unit_layout.setSpacing(6)
+        unit_layout.setHorizontalSpacing(6)
+        unit_layout.setVerticalSpacing(4)
 
         self.length_unit_combo = QComboBox()
+        self._configure_combo(self.length_unit_combo, min_chars=5, max_width=96)
         self.length_unit_combo.addItems(sorted(_LENGTH_UNITS.keys()))
         self.length_unit_combo.setCurrentText(self.tree_unit_system.base.length.symbol)
         self.length_unit_combo.setToolTip("Base length unit used for TreeParameters values")
         self.length_unit_combo.currentTextChanged.connect(self._on_unit_system_changed)
-        unit_layout.addWidget(QLabel("L:"))
-        unit_layout.addWidget(self.length_unit_combo)
+        unit_layout.addWidget(QLabel("L:"), 0, 0)
+        unit_layout.addWidget(self.length_unit_combo, 0, 1)
 
         self.mass_unit_combo = QComboBox()
+        self._configure_combo(self.mass_unit_combo, min_chars=5, max_width=96)
         self.mass_unit_combo.addItems(sorted(_MASS_UNITS.keys()))
         self.mass_unit_combo.setCurrentText(self.tree_unit_system.base.mass.symbol)
         self.mass_unit_combo.setToolTip("Base mass unit used for TreeParameters values")
         self.mass_unit_combo.currentTextChanged.connect(self._on_unit_system_changed)
-        unit_layout.addWidget(QLabel("M:"))
-        unit_layout.addWidget(self.mass_unit_combo)
+        unit_layout.addWidget(QLabel("M:"), 1, 0)
+        unit_layout.addWidget(self.mass_unit_combo, 1, 1)
 
         self.time_unit_combo = QComboBox()
+        self._configure_combo(self.time_unit_combo, min_chars=5, max_width=96)
         self.time_unit_combo.addItems(sorted(_TIME_UNITS.keys()))
         self.time_unit_combo.setCurrentText(self.tree_unit_system.base.time.symbol)
         self.time_unit_combo.setToolTip("Base time unit used for TreeParameters values")
         self.time_unit_combo.currentTextChanged.connect(self._on_unit_system_changed)
-        unit_layout.addWidget(QLabel("T:"))
-        unit_layout.addWidget(self.time_unit_combo)
-
-        unit_layout.addStretch()
+        unit_layout.addWidget(QLabel("T:"), 2, 0)
+        unit_layout.addWidget(self.time_unit_combo, 2, 1)
+        unit_layout.setColumnStretch(1, 1)
         tree_form.addRow(self._make_label_with_info("Unit System:", _PARAM_DESCRIPTIONS['unit_system']), unit_row)
 
         # Number of vessels
@@ -345,26 +395,25 @@ class ParameterPanel(QWidget):
 
         # Per-tree override selector (shown in forest mode)
         self.tree_override_widget = QWidget()
-        override_layout = QHBoxLayout()
+        override_layout = QGridLayout()
         override_layout.setContentsMargins(0, 0, 0, 0)
-        override_layout.setSpacing(6)
+        override_layout.setHorizontalSpacing(6)
+        override_layout.setVerticalSpacing(4)
         self.tree_override_widget.setLayout(override_layout)
-        override_layout.addWidget(QLabel("Edit Tree:"))
+        override_layout.addWidget(QLabel("Edit Tree:"), 0, 0, 1, 2)
         self.override_network_combo = QComboBox()
-        self.override_network_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.override_network_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._configure_combo(self.override_network_combo, min_chars=10, max_width=180)
         self.override_network_combo.setMaxVisibleItems(100)
         self.override_tree_combo = QComboBox()
-        self.override_tree_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.override_tree_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._configure_combo(self.override_tree_combo, min_chars=8, max_width=160)
         self.override_tree_combo.setMaxVisibleItems(100)
         self.override_network_combo.currentIndexChanged.connect(self._on_tree_override_changed)
         self.override_tree_combo.currentIndexChanged.connect(self._on_tree_override_changed)
-        override_layout.addWidget(QLabel("Network"))
-        override_layout.addWidget(self.override_network_combo)
-        override_layout.addWidget(QLabel("Tree"))
-        override_layout.addWidget(self.override_tree_combo)
-        override_layout.addStretch()
+        override_layout.addWidget(QLabel("Network"), 1, 0)
+        override_layout.addWidget(self.override_network_combo, 1, 1)
+        override_layout.addWidget(QLabel("Tree"), 2, 0)
+        override_layout.addWidget(self.override_tree_combo, 2, 1)
+        override_layout.setColumnStretch(1, 1)
         tree_form.addRow(self.tree_override_widget)
         self.tree_override_widget.hide()
 
@@ -415,10 +464,9 @@ class ParameterPanel(QWidget):
         scroll_layout.addWidget(tree_params_group)
 
         # Forest parameters (initially hidden)
-        self.forest_params_group = QGroupBox("Forest Parameters")
+        self.forest_params_group = CollapsibleGroupBox("Forest Parameters", checked=True)
         forest_form = QFormLayout()
-        forest_form.setSpacing(10)
-        forest_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._configure_form(forest_form)
         self.forest_params_group.setLayout(forest_form)
 
         # Number of networks (Forest only)
@@ -456,6 +504,7 @@ class ParameterPanel(QWidget):
 
         # Curve type used when connecting trees into networks
         self.curve_type_combo = QComboBox()
+        self._configure_combo(self.curve_type_combo, min_chars=10, max_width=180)
         # Display labels mapped to internal curve_type strings used by svv.forest.connect.curve.Curve
         self.curve_type_combo.addItem("Bezier", userData="Bezier")
         self.curve_type_combo.addItem("Catmull-Rom", userData="CatmullRom")
@@ -483,10 +532,9 @@ class ParameterPanel(QWidget):
         self.forest_params_group.hide()
 
         # Advanced parameters
-        advanced_group = QGroupBox("Advanced Parameters")
+        advanced_group = CollapsibleGroupBox("Advanced Parameters", checked=False)
         advanced_form = QFormLayout()
-        advanced_form.setSpacing(10)
-        advanced_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._configure_form(advanced_form)
         advanced_group.setLayout(advanced_form)
 
         self.random_seed_spin = QSpinBox()
@@ -1284,18 +1332,18 @@ class ParameterPanel(QWidget):
         else:
             if self.parent_gui:
                 self.parent_gui.log_output("[Forest] connected")
-                self.parent_gui.update_status("Forest connected")
+                if hasattr(self.parent_gui, "show_toast"):
+                    self.parent_gui.show_toast("Forest connected")
+                else:
+                    self.parent_gui.update_status("Forest connected")
                 try:
                     self.parent_gui.vtk_widget.draw_forest(forest)
                 except Exception:
                     # Keep UI responsive even if redraw fails
                     pass
             if show_success_dialog:
-                QMessageBox.information(
-                    self,
-                    "Forest Connected",
-                    "Forest connections created successfully."
-                )
+                if self.parent_gui and hasattr(self.parent_gui, "show_toast"):
+                    self.parent_gui.show_toast("Forest connections created")
 
         if hasattr(self, 'connect_now_btn'):
             self.connect_now_btn.setEnabled(True)
@@ -1587,10 +1635,11 @@ class ParameterPanel(QWidget):
             return
 
         # Visualize and store
-        self.parent_gui.vtk_widget.clear_trees()
-        self.parent_gui.vtk_widget.clear_connections()
-        # Group ID ('single', 0) used for visibility toggles
-        self.parent_gui.vtk_widget.add_tree(tree, label="tree_single", group_id=("single", 0))
+        with self.parent_gui.vtk_widget.batch_render():
+            self.parent_gui.vtk_widget.clear_trees()
+            self.parent_gui.vtk_widget.clear_connections()
+            # Group ID ('single', 0) used for visibility toggles
+            self.parent_gui.vtk_widget.add_tree(tree, label="tree_single", group_id=("single", 0))
         self.parent_gui.trees = [tree]
         self.parent_gui.forest = None
 
@@ -1602,17 +1651,11 @@ class ParameterPanel(QWidget):
                 pass
 
         if self.parent_gui:
-            self.parent_gui.update_status(f"Tree generated successfully with {tree.n_terminals} vessels")
+            if hasattr(self.parent_gui, "show_toast"):
+                self.parent_gui.show_toast(f"Tree generated: {tree.n_terminals} vessels")
+            else:
+                self.parent_gui.update_status(f"Tree generated successfully with {tree.n_terminals} vessels")
             self.parent_gui.log_output(f"[Tree] done: {tree.n_terminals} vessels")
-
-        QMessageBox.information(
-            self,
-            "Success",
-            f"Tree generated successfully!\n\n"
-            f"Total vessels: {tree.n_terminals}\n"
-            f"Physical clearance: {result.get('physical_clearance')}\n"
-            f"Convexity tolerance: {result.get('convexity_tolerance')}"
-        )
 
     def _on_forest_generated(self, result):
         forest = result.get('forest')
@@ -1635,26 +1678,17 @@ class ParameterPanel(QWidget):
 
         total_vessels = result.get('total_vessels', 0)
         n_networks = result.get('n_networks', 0)
-        compete = result.get('compete', False)
-        physical_clearance = result.get('physical_clearance')
 
         if self.parent_gui:
-            self.parent_gui.update_status(
-                f"Forest generated successfully with {total_vessels} vessels across {n_networks} networks"
-            )
+            if hasattr(self.parent_gui, "show_toast"):
+                self.parent_gui.show_toast(f"Forest generated: {total_vessels} vessels across {n_networks} networks")
+            else:
+                self.parent_gui.update_status(
+                    f"Forest generated successfully with {total_vessels} vessels across {n_networks} networks"
+                )
             self.parent_gui.log_output(f"[Forest] done: {total_vessels} vessels across {n_networks} networks")
             if forest.connections is None:
                 self.parent_gui.log_output("[Forest] connect pending - click Connect Forest to link trees")
-
-        QMessageBox.information(
-            self,
-            "Success",
-            f"Forest generated successfully!\n\n"
-            f"Total vessels: {total_vessels}\n"
-            f"Networks: {n_networks}\n"
-            f"Competition: {'Enabled' if compete else 'Disabled'}\n"
-            f"Physical clearance: {physical_clearance}"
-        )
 
     def _export_config(self):
         """Export the current configuration."""
