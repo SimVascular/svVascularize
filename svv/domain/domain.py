@@ -324,7 +324,8 @@ class Domain(object):
         _invoke_progress(progress_callback, 1.0, "Domain solve complete", None)
         return None
 
-    def build(self, resolution: int = 25, skip_boundary: bool = False, progress_callback=None) -> None:
+    def build(self, resolution: int = 25, skip_boundary: bool = False,
+              progress_callback=None, **interior_kwargs) -> None:
         """
         Assemble the global implicit function and optional boundary/mesh artifacts.
 
@@ -341,6 +342,9 @@ class Domain(object):
         skip_boundary : bool, optional
             When True, skip building boundary and interior mesh artifacts and
             only assemble fast‑evaluation structures. Default False.
+        interior_kwargs : dict, optional
+            Additional keyword arguments forwarded to get_interior(), including
+            TetGen options and remeshing fallback controls.
         """
         # If this Domain was loaded from a .dmn file, it already has
         # A/B/C/D/PTS and possibly a function_tree. In that case, skip
@@ -392,7 +396,7 @@ class Domain(object):
                         report(None, "Tetrahedralizing domain interior...", True)
                     else:
                         report(0.75, "Triangulating domain interior...")
-                    self.get_interior()
+                    self.get_interior(**interior_kwargs)
                     report(0.95, "Interior mesh ready", False)
             report(1.0, "Domain build complete", False, force=True)
             return None
@@ -439,7 +443,7 @@ class Domain(object):
                 report(None, "Tetrahedralizing domain interior...", True)
             else:
                 report(0.82, "Triangulating domain interior...")
-            self.get_interior()
+            self.get_interior(**interior_kwargs)
             report(0.97, "Interior mesh ready", False)
         report(1.0, "Domain build complete", False, force=True)
         return None
@@ -712,7 +716,10 @@ class Domain(object):
         verbose : bool
             A flag to indicate if mesh fixing should be verbose.
         kwargs : dict
-            A dictionary of keyword arguments to be passed to TetGen.
+            A dictionary of keyword arguments to be passed to TetGen. In 3D,
+            this also accepts tetrahedralize() retry controls such as
+            remesh_on_failure, remesh_subdivisions, remesh_clusters, and
+            remesh_clean_tolerance.
 
         Returns
         -------

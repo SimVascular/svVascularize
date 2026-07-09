@@ -15,5 +15,6 @@ trimesh
 meshio
 pymeshfix==0.17.0
 pyvista>=0.44.2
+pyacvd
 vtk
 psutil>=5.9.0

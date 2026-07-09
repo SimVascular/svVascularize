@@ -16,6 +16,7 @@ trimesh[all]
 meshio
 open3d; python_version < "3.13"
 pyvista>=0.44.2
+pyacvd
 scikit-learn
 tqdm
 pymeshfix==0.17.0

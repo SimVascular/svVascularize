@@ -87,31 +87,58 @@ def _run_tetgen(surface_mesh):
     nodes, elems = tgen.tetrahedralize(verbose=0)
     return nodes, elems
 
-def tetrahedralize(surface: pv.PolyData,
-                   *tet_args,
-                   worker_script: str = dirpath+os.sep+"tetgen_worker.py",
-                   python_exe: str = sys.executable,
-                   **tet_kwargs):
+def uniform_remesh_surface(surface: pv.PolyData,
+                           *,
+                           subdivisions: int = 3,
+                           clusters: int = 20000,
+                           clean_tolerance: float = 1e-5) -> pv.PolyData:
     """
-    Tetrahedralize a surface mesh using TetGen.
+    Generate a uniform, isotropic triangle surface for TetGen retry attempts.
 
-    Parameters
-    ----------
-    surface_mesh : PyMesh mesh object
-        The surface mesh to tetrahedralize.
-    verbose : bool
-        A flag to indicate if mesh fixing should be verbose.
-    kwargs : dict
-        A dictionary of keyword arguments to be passed to TetGen.
-
-    Returns
-    -------
-    mesh : PyMesh mesh object
-        An unstructured grid mesh representing the tetrahedralized
-        volume enclosed by the surface mesh manifold.
+    PyACVD is imported lazily so callers that do not need the retry path do not
+    pay the import cost until TetGen actually fails.
     """
-    tet_kwargs.setdefault("verbose", 0)
+    try:
+        import pyacvd
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyACVD is required for TetGen uniform remeshing fallback. "
+            "Install pyacvd or call tetrahedralize(..., remesh_on_failure=False)."
+        ) from exc
 
+    if subdivisions < 0:
+        raise ValueError("subdivisions must be non-negative")
+    if clusters <= 0:
+        raise ValueError("clusters must be positive")
+
+    if not isinstance(surface, pv.PolyData):
+        surface = surface.extract_surface()
+    base_mesh = pv.PolyData(surface.points, surface.faces)
+    if clean_tolerance is not None:
+        base_mesh = base_mesh.clean(tolerance=clean_tolerance)
+    if not base_mesh.is_all_triangles:
+        base_mesh = base_mesh.triangulate()
+
+    if base_mesh.n_cells == 0:
+        raise ValueError("Cannot remesh an empty surface")
+
+    clustering = pyacvd.Clustering(base_mesh)
+    if subdivisions:
+        clustering.subdivide(int(subdivisions))
+    clustering.cluster(int(clusters))
+    remeshed = clustering.create_mesh()
+    if clean_tolerance is not None:
+        remeshed = remeshed.clean(tolerance=clean_tolerance)
+    if not remeshed.is_all_triangles:
+        remeshed = remeshed.triangulate()
+    return remeshed
+
+
+def _tetgen_worker_tetrahedralize(surface: pv.PolyData,
+                                  tet_args,
+                                  tet_kwargs,
+                                  worker_script: str,
+                                  python_exe: str):
     # On Windows, `tempfile` honors TMPDIR, which may be set to a POSIX-style
     # path such as '/tmp' and is not a valid directory there. Prefer the
     # standard TEMP/TMP locations when available to avoid spurious
@@ -217,6 +244,15 @@ def tetrahedralize(surface: pv.PolyData,
             nodes = data["nodes"]
             elems = data["elems"]
 
+    return nodes, elems
+
+
+def _tetgen_grid_from_arrays(nodes, elems):
+    """
+    Convert TetGen node/connectivity arrays into a PyVista unstructured grid.
+    """
+    nodes = np.asarray(nodes)
+    elems = np.asarray(elems)
     if elems.min() == 1:
         elems = elems - 1
 
@@ -237,3 +273,76 @@ def tetrahedralize(surface: pv.PolyData,
     grid = pv.UnstructuredGrid(cells, celltypes, nodes)
 
     return grid, nodes, elems
+
+
+def tetrahedralize(surface: pv.PolyData,
+                   *tet_args,
+                   worker_script: str = dirpath+os.sep+"tetgen_worker.py",
+                   python_exe: str = sys.executable,
+                   remesh_on_failure: bool = True,
+                   remesh_subdivisions: int = 3,
+                   remesh_clusters: int = 20000,
+                   remesh_clean_tolerance: float = 1e-5,
+                   **tet_kwargs):
+    """
+    Tetrahedralize a surface mesh using TetGen.
+
+    Parameters
+    ----------
+    surface_mesh : PyMesh mesh object
+        The surface mesh to tetrahedralize.
+    verbose : bool
+        A flag to indicate if mesh fixing should be verbose.
+    kwargs : dict
+        A dictionary of keyword arguments to be passed to TetGen.
+    remesh_on_failure : bool
+        If True, retry TetGen once using a PyACVD uniform isotropic remesh
+        when the original surface fails to tetrahedralize.
+    remesh_subdivisions : int
+        Number of PyACVD subdivision passes used by the retry path.
+    remesh_clusters : int
+        Number of PyACVD clusters used by the retry path.
+    remesh_clean_tolerance : float
+        PyVista clean tolerance applied before and after PyACVD remeshing.
+
+    Returns
+    -------
+    mesh : PyMesh mesh object
+        An unstructured grid mesh representing the tetrahedralized
+        volume enclosed by the surface mesh manifold.
+    """
+    tet_kwargs.setdefault("verbose", 0)
+
+    try:
+        nodes, elems = _tetgen_worker_tetrahedralize(
+            surface, tet_args, tet_kwargs, worker_script, python_exe
+        )
+    except RuntimeError as original_error:
+        if not remesh_on_failure:
+            raise
+        try:
+            remeshed_surface = uniform_remesh_surface(
+                surface,
+                subdivisions=remesh_subdivisions,
+                clusters=remesh_clusters,
+                clean_tolerance=remesh_clean_tolerance,
+            )
+        except Exception as remesh_error:
+            raise RuntimeError(
+                "TetGen failed and uniform surface remeshing fallback failed.\n\n"
+                f"Original TetGen error:\n{original_error}\n\n"
+                f"Remeshing error:\n{remesh_error}"
+            ) from remesh_error
+
+        try:
+            nodes, elems = _tetgen_worker_tetrahedralize(
+                remeshed_surface, tet_args, tet_kwargs, worker_script, python_exe
+            )
+        except RuntimeError as retry_error:
+            raise RuntimeError(
+                "TetGen failed after PyACVD uniform surface remeshing fallback.\n\n"
+                f"Original TetGen error:\n{original_error}\n\n"
+                f"Retry TetGen error:\n{retry_error}"
+            ) from retry_error
+
+    return _tetgen_grid_from_arrays(nodes, elems)
