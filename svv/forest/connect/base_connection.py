@@ -274,146 +274,108 @@ class BaseConnection:
         """
         Returns a list of constraint dictionaries to be used in a
         typical optimizer (e.g., scipy.optimize).
+
+        Uses a shared cache so control points, curve, and evaluations
+        are computed once per unique optimizer input and shared across
+        all constraint functions.
         """
+        # Shared cache: avoids rebuilding control points and curve
+        # for every constraint in the same optimizer iteration.
+        _cache = {'key': None, 'ctrl_pts': None, 'curve': None,
+                  'curve_pts_t': None, 'curve_pts_roc': None}
+
+        # Pre-compute constant values
+        min_radius_needed = 2 * max(radius1, radius2)
+        max_radius = max(self.radius_0, self.radius_1)
+        t_values_curve = np.linspace(0, 1, t_num)
+        t_values_roc = np.linspace(0, 1, 50)  # Reduced from 100 for curvature
+        t_values_boundary = np.linspace(0, 1, 40)  # Reduced from 100 for boundary
+        has_collision_segments = (len(self.other_line_segments) > 0 if
+                                  hasattr(self.other_line_segments, '__len__') else False)
+
+        # Pre-compute collision radii offset if there are collision segments
+        if has_collision_segments:
+            _collision_radii = self.other_line_segments[:, 6].reshape(-1, 1) + max_radius + self.min_distance
+
+        def _get_cached(ctrlpts_flat):
+            """Return (control_points, curve) from cache or recompute."""
+            key = ctrlpts_flat.tobytes()
+            if _cache['key'] != key:
+                _cache['key'] = key
+                _cache['ctrl_pts'] = self._build_control_points(ctrlpts_flat, mid, n_pts)
+                _cache['curve'] = Curve(_cache['ctrl_pts'], curve_type=self.curve_type)
+                _cache['curve_pts_t'] = None
+                _cache['curve_pts_roc'] = None
+            return _cache['ctrl_pts'], _cache['curve']
+
+        def _get_curve_points(ctrlpts_flat, variant='t'):
+            """Return cached curve points for the given evaluation set."""
+            _, curve = _get_cached(ctrlpts_flat)
+            cache_key = 'curve_pts_' + variant
+            if _cache[cache_key] is None:
+                if variant == 't':
+                    _cache[cache_key] = curve.evaluate(t_values_curve)
+                elif variant == 'roc':
+                    _cache[cache_key] = None  # roc uses its own t values
+            return _cache[cache_key]
 
         def curvature_constraint(ctrlpts_flat):
-            control_points = self._build_control_points(ctrlpts_flat, mid, n_pts)
-            curve = Curve(control_points, curve_type=self.curve_type)
-
-            # Evaluate radius of curvature
-            t_values = np.linspace(0, 1, 100)
-            roc_values = curve.roc(t_values)
-
-            # Enforce min radius of curvature
-            min_radius_needed = 2 * max(radius1, radius2)
+            _, curve = _get_cached(ctrlpts_flat)
+            roc_values = curve.roc(t_values_roc)
             return np.min(roc_values[1:-1]) - min_radius_needed
 
         def non_coincidence_constraint(ctrlpts_flat):
-            """
-            Ensures that no two control points coincide
-            (enforce a small min distance between them).
-            """
-            control_points = self._build_control_points(ctrlpts_flat, mid, n_pts)
+            control_points, _ = _get_cached(ctrlpts_flat)
             distances = pdist(control_points)
-            return np.min(distances) - 1e-4  # or self.min_distance
+            return np.min(distances) - 1e-4
 
         def curve_min_distance_constraint(ctrlpts_flat):
-            """
-            Ensures that the constructed curve is not too close
-            to other line segments in the scene.
-            """
-            control_points = self._build_control_points(ctrlpts_flat, mid, n_pts)
-            if len(other_line_segments) == 0:
-                return 1.0  # If no other segments, no penalty
+            if not has_collision_segments:
+                return 1.0
 
-            curve = Curve(control_points, curve_type=self.curve_type)
-            t_values = np.linspace(0, 1, t_num)
-            curve_points = curve.evaluate(t_values)
+            curve_points = _get_curve_points(ctrlpts_flat, 't')
+            if curve_points is None:
+                _, curve = _get_cached(ctrlpts_flat)
+                curve_points = curve.evaluate(t_values_curve)
+                _cache['curve_pts_t'] = curve_points
 
-            # Build array of segments from the discretized curve
-            segments = np.zeros((curve_points.shape[0] - 1, 6))
+            # Build segments from discretized curve
+            segments = np.empty((curve_points.shape[0] - 1, 6))
             segments[:, :3] = curve_points[:-1]
             segments[:, 3:] = curve_points[1:]
 
-            # Evaluate the distance
-            # The 'minimum_segment_distance' presumably returns NxM array
-            # of distances between two sets of line segments
-            if len(self.other_line_segments) > 0:
-                dist_main = np.min(
-                    minimum_segment_distance(self.other_line_segments[:, :6], segments)
-                    - self.other_line_segments[:, 6].reshape(-1, 1) - max(self.radius_0, self.radius_1)
-                ) - self.min_distance
-                #dist_main_check = np.min(
-                #    cylinders_collide_any_naive(self.other_line_segments[:, :6], segments)
-                #    - self.other_line_segments[:, 6].reshape(-1, 1) - max(self.radius_0, self.radius_1)
-                #) - self.min_distance
-                #assert dist_main == dist_main_check, "{} != {} INCORRECT CHECK".format(dist_main,dist_main_check)
-                return dist_main
-            else:
-                return 1.0
+            dist_matrix = minimum_segment_distance(self.other_line_segments[:, :6], segments)
+            dist_main = np.min(dist_matrix - _collision_radii)
+            return dist_main
 
         def boundary_constraint(ctrlpts_flat):
-            """
-            Ensures that the entire curve lies within the domain
-            (with an optional clearance).
-            """
             if self.domain is None:
-                return 1.0  # No domain => no constraint
-
-            control_points = self._build_control_points(ctrlpts_flat, mid, n_pts)
-            curve = Curve(control_points, curve_type=self.curve_type)
-            t_values = np.linspace(0, 1, 100)
-            curve_points = curve.evaluate(t_values)
-
-            # ------------------------------------------------------
-            # 1) If domain is a callable, use the original logic
-            # ------------------------------------------------------
-            if callable(self.domain):
-                # domain(curve_points) presumably returns distances to the boundary
-                # (negative => out-of-domain, positive => inside)
-                values = self.domain(curve_points)
-                # We want the entire curve to be inside =>
-                #   the maximum distance should remain positive
-                # The additional clearance is subtracted to enforce a "buffer zone".
-                return -(np.max(values) + self.clearance)
-
-            # ------------------------------------------------------
-            # 2) If domain is PyVista PolyData, do an inside test
-            # ------------------------------------------------------
-            elif isinstance(self.domain, pv.PolyData):
-                # We assume 'self.domain' is a closed (watertight) mesh.
-                # We'll create a temporary PyVista mesh from the curve points
-                temp_points = pv.PolyData(curve_points)
-
-                # Use the select_enclosed_points filter:
-                #   `enclosed_result` is typically an UnstructuredGrid with a point-data
-                #   array named 'SelectedPoints' (1 = inside, 0 = outside).
-                enclosed_result = temp_points.select_enclosed_points(self.domain, tolerance=0.0)
-                inside_mask = enclosed_result['SelectedPoints']  # numpy array of 0 or 1
-
-                if not np.all(inside_mask):
-                    # Some points of the curve lie outside the domain surface
-                    return -1.0
-                else:
-                    # Entire curve is inside
-                    # If you also want a clearance, consider measuring the distance
-                    # from each point to the surface (using e.g. 'find_closest_point')
-                    # and ensuring it exceeds self.clearance. That logic would replace
-                    # or supplement the simple "inside test" here.
-                    return 1.0
-
-            # ------------------------------------------------------
-            # 3) Fallback if domain is of another type (optional)
-            # ------------------------------------------------------
-            else:
-                # You could raise an error or just return a non-violating value
-                # depending on your application's needs.
-                print("Warning: Domain type not recognized. No boundary constraint applied.")
                 return 1.0
 
-        # You could also add a constraint on the raw control points
-        # bounding box if desired:
-        #
-        # def ctrlpts_boundary_constraint(ctrlpts_flat):
-        #     control_points = self._build_control_points(ctrlpts_flat, mid, n_pts)
-        #     ctrl_min = np.min(control_points, axis=0)
-        #     ctrl_max = np.max(control_points, axis=0)
-        #     # Must be within [x_min, x_max], [y_min, y_max], [z_min, z_max]
-        #     # Return min(...) so that if anything is out of bounds, constraint < 0
-        #     return min(
-        #         *(ctrl_min - [self.x_min, self.y_min, self.z_min]),
-        #         *([self.x_max, self.y_max, self.z_max] - ctrl_max)
-        #     )
+            _, curve = _get_cached(ctrlpts_flat)
+            curve_points = curve.evaluate(t_values_boundary)
+
+            if callable(self.domain):
+                values = self.domain(curve_points)
+                return -(np.max(values) + self.clearance)
+            elif isinstance(self.domain, pv.PolyData):
+                temp_points = pv.PolyData(curve_points)
+                enclosed_result = temp_points.select_enclosed_points(self.domain, tolerance=0.0)
+                inside_mask = enclosed_result['SelectedPoints']
+                return 1.0 if np.all(inside_mask) else -1.0
+            else:
+                return 1.0
+
         def self_collision(ctrlpts_flat):
-            control_points = self._build_control_points(ctrlpts_flat, mid, n_pts)
-            curve = Curve(control_points, curve_type=self.curve_type)
-            t_values = np.linspace(0, 1, t_num)
-            curve_points = curve.evaluate(t_values)
-            segments = np.zeros((t_num - 1, 7))
+            curve_points = _get_curve_points(ctrlpts_flat, 't')
+            if curve_points is None:
+                _, curve = _get_cached(ctrlpts_flat)
+                curve_points = curve.evaluate(t_values_curve)
+                _cache['curve_pts_t'] = curve_points
+            segments = np.empty((t_num - 1, 6))
             segments[:, :3] = curve_points[:-1]
             segments[:, 3:6] = curve_points[1:]
-            segments[:, 6] = max(self.radius_0, self.radius_1)
-            dist_main = np.min(minimum_self_segment_distance(segments[:, :6]) - max(self.radius_0, self.radius_1)) - self.min_distance
+            dist_main = minimum_self_segment_distance(segments) - max_radius - self.min_distance
             return dist_main
 
         return [
@@ -421,9 +383,6 @@ class BaseConnection:
             {'type': 'ineq', 'fun': curve_min_distance_constraint},
             {'type': 'ineq', 'fun': non_coincidence_constraint},
             {'type': 'ineq', 'fun': boundary_constraint},
-            #{'type': 'ineq', 'fun': self_collision}
-            # Example if you also want the control-points bounding box check:
-            # {'type': 'ineq', 'fun': ctrlpts_boundary_constraint},
         ]
 
     def solve(self, n_mid_pts, t_num=20):

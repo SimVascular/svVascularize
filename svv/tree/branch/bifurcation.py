@@ -277,7 +277,7 @@ def add_vessel(tree, **kwargs):
                         #terminal_daughter_vessel = TreeData()
                         #parent_vessel = TreeData()
                         #connectivity = numpy.nan_to_num(tree.data[:, 15:18], nan=-1.0).astype(int)
-                        connectivity = deepcopy(tree.connectivity)
+                        connectivity = tree.connectivity.copy()
                         #create_new_vessels(bifurcation_point, tree.data, terminal_point, terminal_vessel,
                         #                   terminal_daughter_vessel, parent_vessel, max_distal_node,
                         #                   numpy.float64(tree.data.shape[0]),
@@ -626,18 +626,18 @@ def add_vessel(tree, **kwargs):
                         #downstream = numpy.array(sorted(set(tree.vessel_map[bifurcation_vessel]['downstream'])), dtype=int)
                         #upstream = np.sort(np.unique(tree.vessel_map[bifurcation_vessel]['upstream'])).astype(np.int64)
                         #downstream = np.sort(np.unique(tree.vessel_map[bifurcation_vessel]['downstream'])).astype(np.int64)
-                        upstream = deepcopy(sorted(set(tree.vessel_map[bifurcation_vessel]['upstream'])))
-                        downstream = deepcopy(sorted(set(tree.vessel_map[bifurcation_vessel]['downstream'])))
+                        upstream = sorted(set(tree.vessel_map[bifurcation_vessel]['upstream']))
+                        downstream = sorted(set(tree.vessel_map[bifurcation_vessel]['downstream']))
                         terminal_map[data.shape[0]] = {'upstream': [], 'downstream': []}
                         #terminal_map[data.shape[0]]['upstream'] = numpy.append(upstream, numpy.array([bifurcation_vessel]))
-                        terminal_map[data.shape[0]]['upstream'] = deepcopy(upstream)
+                        terminal_map[data.shape[0]]['upstream'] = list(upstream)
                         #print("Before 0: {}".format(terminal_map[tree.data.shape[0]]['upstream']))
                         terminal_map[data.shape[0]]['upstream'].append(bifurcation_vessel)
                         #print("After 0: {}".format(terminal_map[tree.data.shape[0]]['upstream']))
                         terminal_daughter_map = TreeMap()
                         terminal_daughter_map[data.shape[0] + 1] = {'upstream': [], 'downstream': []}
-                        terminal_daughter_map[data.shape[0] + 1]['upstream'] = deepcopy(upstream)
-                        terminal_daughter_map[data.shape[0] + 1]['downstream'] = deepcopy(downstream)
+                        terminal_daughter_map[data.shape[0] + 1]['upstream'] = list(upstream)
+                        terminal_daughter_map[data.shape[0] + 1]['downstream'] = list(downstream)
                         #terminal_daughter_map[tree.data.shape[0] + 1]['upstream'] = numpy.append(upstream, numpy.array([bifurcation_vessel]))
                         #print("Before: {}".format(terminal_daughter_map[tree.data.shape[0] + 1]['upstream']))
                         terminal_daughter_map[data.shape[0] + 1]['upstream'].append(bifurcation_vessel)
@@ -685,7 +685,7 @@ def add_vessel(tree, **kwargs):
                         tree.times['chunk_3_2'][-1] += end_3_2 - start_3_2
                         start_3_3 = perf_counter()
                         #connectivity = numpy.nan_to_num(tree.data[:, 15:18], nan=-1.0).astype(int)
-                        connectivity = deepcopy(tree.connectivity)
+                        connectivity = tree.connectivity.copy()
                         #if (np.any(connectivity != connectivity_2)):
                         #    print('Connectivity mismatch!')
                         #    print('Connectivity: ', connectivity)
@@ -1441,16 +1441,16 @@ def add_vessel(tree, **kwargs):
                         terminal_map = TreeMap()
                         #upstream = numpy.array(sorted(set(tree.vessel_map[bifurcation_vessel]['upstream'])),dtype=int)
                         #downstream = numpy.array(sorted(set(tree.vessel_map[bifurcation_vessel]['downstream'])), dtype=int)
-                        upstream = deepcopy(sorted(set(tree.vessel_map[bifurcation_vessel]['upstream'])))
-                        downstream = deepcopy(sorted(set(tree.vessel_map[bifurcation_vessel]['downstream'])))
+                        upstream = sorted(set(tree.vessel_map[bifurcation_vessel]['upstream']))
+                        downstream = sorted(set(tree.vessel_map[bifurcation_vessel]['downstream']))
                         terminal_map[data.shape[0]] = {'upstream': [], 'downstream': []}
                         #terminal_map[tree.data.shape[0]]['upstream'] = numpy.append(upstream, numpy.array([bifurcation_vessel]))
-                        terminal_map[data.shape[0]]['upstream'] = deepcopy(upstream)
+                        terminal_map[data.shape[0]]['upstream'] = list(upstream)
                         terminal_map[data.shape[0]]['upstream'].append(bifurcation_vessel)
                         terminal_daughter_map = TreeMap()
                         terminal_daughter_map[data.shape[0] + 1] = {'upstream': [], 'downstream': []}
-                        terminal_daughter_map[data.shape[0] + 1]['upstream'] = deepcopy(upstream)
-                        terminal_daughter_map[data.shape[0] + 1]['downstream'] = deepcopy(downstream)
+                        terminal_daughter_map[data.shape[0] + 1]['upstream'] = list(upstream)
+                        terminal_daughter_map[data.shape[0] + 1]['downstream'] = list(downstream)
                         #terminal_daughter_map[data.shape[0] + 1]['upstream'] = numpy.append(upstream, numpy.array([bifurcation_vessel]))
                         terminal_daughter_map[data.shape[0] + 1]['upstream'].append(bifurcation_vessel)
                         parent_map = TreeMap()
@@ -1501,7 +1501,7 @@ def add_vessel(tree, **kwargs):
                         new_data = []
                         old_data = []
                         #connectivity = numpy.nan_to_num(tree.data[:, 15:18], nan=-1.0).astype(int)
-                        connectivity = deepcopy(tree.connectivity)
+                        connectivity = tree.connectivity.copy()
                         results = update_vessels(bifurcation_point, data, terminal_point,
                                                  connectivity, bifurcation_vessel, tree.parameters.murray_exponent,
                                                  tree.parameters.kinematic_viscosity * tree.parameters.fluid_density,

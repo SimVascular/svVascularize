@@ -56,6 +56,8 @@ class BezierCurve(BaseCurve, ABC):
         """
         Evaluate the Bézier curve at the given array of parametric values.
 
+        Uses vectorized De Casteljau's algorithm to evaluate all points at once.
+
         Parameters
         ----------
         t_values : array-like
@@ -68,11 +70,23 @@ class BezierCurve(BaseCurve, ABC):
             Shape: (len(t_values), d).
         """
         t_values = np.atleast_1d(t_values)
-        return np.array([self._de_casteljau(self.control_points, t) for t in t_values])
+        # Vectorized De Casteljau: process all t values simultaneously
+        # pts shape: (n_ctrl_pts, len(t_values), d)
+        pts = np.broadcast_to(
+            self.control_points[:, None, :],
+            (self.control_points.shape[0], len(t_values), self.control_points.shape[1])
+        ).copy()
+        t = t_values[None, :, None]  # (1, len(t_values), 1)
+        n = pts.shape[0]
+        for i in range(n - 1):
+            pts[:n - 1 - i] = (1 - t) * pts[:n - 1 - i] + t * pts[1:n - i]
+        return pts[0]  # (len(t_values), d)
 
     def derivative(self, t_values, order=1):
         """
         Compute the nth derivative of the Bézier curve at specified parametric values.
+
+        Uses vectorized evaluation for all t values simultaneously.
 
         Parameters
         ----------
@@ -94,12 +108,22 @@ class BezierCurve(BaseCurve, ABC):
             derivative_points = n * (derivative_points[1:] - derivative_points[:-1])
             n -= 1
             if n < 0:
-                # Instead of np.zeros_like(...), create a shape (1, d) array of zeros
                 derivative_points = np.zeros((1, derivative_points.shape[1]))
                 break
 
         t_values = np.atleast_1d(t_values)
-        return np.array([self._de_casteljau(derivative_points, t) for t in t_values])
+        # Vectorized De Casteljau on derivative control points
+        m = derivative_points.shape[0]
+        if m == 1:
+            return np.broadcast_to(derivative_points[0], (len(t_values), derivative_points.shape[1])).copy()
+        pts = np.broadcast_to(
+            derivative_points[:, None, :],
+            (m, len(t_values), derivative_points.shape[1])
+        ).copy()
+        t = t_values[None, :, None]
+        for i in range(m - 1):
+            pts[:m - 1 - i] = (1 - t) * pts[:m - 1 - i] + t * pts[1:m - i]
+        return pts[0]
 
     def roc(self, t_values):
         """
