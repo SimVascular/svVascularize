@@ -48,6 +48,8 @@ class Domain(object):
         self.patches = []
         self.functions = []
         self.function_tree = None
+        self._composite_operation = None
+        self._composite_operands = None
         self.points = None
         self.normals = None
         self.boundary = None
@@ -361,6 +363,25 @@ class Domain(object):
                 last_progress = progress
             _invoke_progress(progress_callback, progress, label, indeterminate)
 
+        if getattr(self, '_composite_operation', None) is not None:
+            report(0.0, "Building composite domain structures...", force=True)
+            self._build_composite_function_tree()
+            report(0.55, "Composite evaluator ready")
+            if self.random_generator is None:
+                self.set_random_generator()
+            if not skip_boundary:
+                report(0.65, "Extracting domain boundary...")
+                self.get_boundary(resolution)
+                report(0.8, "Domain boundary extracted")
+                if self.points.shape[1] == 3:
+                    report(None, "Tetrahedralizing domain interior...", True)
+                else:
+                    report(0.82, "Triangulating domain interior...")
+                self.get_interior(**interior_kwargs)
+                report(0.97, "Interior mesh ready", False)
+            report(1.0, "Domain build complete", False, force=True)
+            return None
+
         if len(getattr(self, 'patches', [])) == 0 and hasattr(self, 'PTS'):
             report(0.0, "Rebuilding cached domain structures...", force=True)
             if getattr(self, 'function_tree', None) is None:
@@ -458,43 +479,87 @@ class Domain(object):
         """
         return self.evaluate_fast(points, **kwargs)
 
+    def _build_composite_function_tree(self):
+        """Build a representative-point index for a composite domain."""
+        tree_points = []
+        for operand in self._composite_operands:
+            if getattr(operand, '_composite_operation', None) is not None:
+                operand._build_composite_function_tree()
+            operand_tree = operand.function_tree
+            if operand_tree is None:
+                raise ValueError(
+                    "Composite domain operands must be built before the composite domain."
+                )
+            points = np.asarray(getattr(operand_tree, 'data', None))
+            if points.ndim != 2 or points.shape[0] == 0:
+                raise ValueError("Composite domain operand has an invalid function tree.")
+            if points.shape[1] != self.d:
+                raise ValueError("Composite domain operand dimension mismatch.")
+            tree_points.append(points)
+        self.function_tree = cKDTree(np.vstack(tree_points))
+        return None
+
+    def _evaluate_composite(self, points, **kwargs):
+        """Evaluate the boolean operation represented by this domain."""
+        if self.function_tree is None:
+            raise ValueError("Domain not built.")
+        first, second = self._composite_operands
+        first_values = first(points, **kwargs)
+        second_values = second(points, **kwargs)
+        if self._composite_operation == 'union':
+            return (
+                np.logical_and(first_values > 0, second_values > 0)
+                * (np.abs(first_values) + np.abs(second_values))
+                + (first_values < 0) * first_values
+                + (second_values < 0) * second_values
+            )
+        if self._composite_operation == 'difference':
+            return (
+                np.logical_and(first_values < 0, second_values < 0)
+                * (np.abs(first_values) + np.abs(second_values))
+                + first_values
+            )
+        raise ValueError(f"Unsupported composite operation: {self._composite_operation}")
+
+    def _combine(self, other, operation):
+        """Create a domain representing a boolean operation on two domains."""
+        if not isinstance(other, Domain):
+            return NotImplemented
+        if self.points is None or other.points is None:
+            raise ValueError("Both domains must define point data before combination.")
+        if self.points.ndim != 2 or other.points.ndim != 2:
+            raise ValueError("Domain point data must be two-dimensional.")
+        if self.points.shape[1] != other.points.shape[1]:
+            raise ValueError("Cannot combine domains with different dimensions.")
+
+        points = np.vstack((self.points, other.points))
+        if self.normals is not None and other.normals is not None:
+            normals = np.vstack((self.normals, other.normals))
+            new_domain = Domain(points, normals)
+        else:
+            new_domain = Domain(points)
+        new_domain._composite_operation = operation
+        new_domain._composite_operands = (self, other)
+        return new_domain
+
     def __sub__(self, other):
         """
         Subtract two domains. This is the set difference operation.
 
         """
-        new_domain = Domain()
-        def evaluate(x):
-            self_object = self.__call__(x)
-            other_object = other.__call__(x)
-            values = (np.logical_and(self_object < 0, other_object < 0)*(abs(self_object) + abs(other_object)) +
-                      self_object)
-            return values
-        new_domain.evaluate = evaluate
-        new_domain.points = np.vstack((self.points, other.points))
-        new_domain.normals = np.vstack((self.normals, other.normals))
-        #new_domain.evaluate = lambda x: np.logical_and(self.__call__(x) < 0, other.__call__(x) < 0)*(abs(self.__call__(x)) + abs(other.__call__(x))) + self.__call__(x)
-        return new_domain
+        return self._combine(other, 'difference')
 
     def __add__(self, other):
         """
         Add two domains. This is the set union operation.
         """
-        new_domain = Domain()
-        def evaluate(x):
-            self_object = self.__call__(x)
-            other_object = other.__call__(x)
-            values = (np.logical_and(self_object > 0, other_object > 0)*(abs(self_object) +
-                                                                         abs(other_object)) +
-                      (self_object < 0)*self_object + (other_object < 0)*other_object)
-            return values
-        new_domain.evaluate = evaluate
-        new_domain.points = np.vstack((self.points, other.points))
-        new_domain.normals = np.vstack((self.normals, other.normals))
-        #new_domain.evaluate = lambda x: np.logical_and(self.__call__(x) > 0, other.__call__(x) > 0)*(abs(self.__call__(x)) + abs(other.__call__(x))) + (self.__call__(x) < 0)*self.__call__(x) + (other.__call__(x) < 0)*other.__call__(x)
-        return new_domain
+        return self._combine(other, 'union')
 
     def evaluate_fast(self, points, k=1, normalize=True, tolerance=np.finfo(float).eps * 4, show=False):
+        if getattr(self, '_composite_operation', None) is not None:
+            return self._evaluate_composite(
+                points, k=k, normalize=normalize, tolerance=tolerance, show=show
+            )
         if self.function_tree is None:
             raise ValueError("Domain not built.")
         if self.points.shape[1] != self.d:
@@ -588,6 +653,10 @@ class Domain(object):
         :param tolerance:
         :return:
         """
+        if getattr(self, '_composite_operation', None) is not None:
+            return self._evaluate_composite(
+                points, k=k, normalize=normalize, tolerance=tolerance, show=show
+            )
         if self.function_tree is None:
             raise ValueError("Domain not built.")
         values = np.zeros((points.shape[0], 1))
