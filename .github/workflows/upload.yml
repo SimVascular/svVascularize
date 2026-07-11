@@ -506,4 +506,3 @@ jobs:
             dist/svv-*.whl
             dist/svv-*.tar.gz
             dist/svv_accelerated-*.whl
-            dist/svv-accelerated-*.whl
