@@ -22,7 +22,7 @@ VERSION_FILE_DEFAULT = Path("svv/__init__.py")
 SUPPORTED_PROJECTS = {"svv", "svv-accelerated"}
 VERSION_ASSIGNMENT = re.compile(
     r"^(?P<prefix>__version__\s*=\s*)(?P<quote>['\"])(?P<version>[^'\"]+)"
-    r"(?P=quote)(?P<trailing>[ \t]*)$",
+    r"(?P=quote)(?P<trailing>[ \t]*)(?:\r)?$",
     re.MULTILINE,
 )
 RELEASE_VERSION = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
