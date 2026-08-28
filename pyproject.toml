@@ -5,7 +5,8 @@ requires = [
   # Ensure PEP 517 build environments have the headers/tools needed to compile extensions
   "Cython>=3.0.7",
   "numpy>=1.24,<2; python_version < '3.12'",
-  "numpy>=1.26,<2; python_version >= '3.12'",
+  "numpy>=1.26,<2; python_version >= '3.12' and python_version < '3.13'",
+  "numpy>=2.1; python_version >= '3.13'",
 ]
 
 build-backend = "setuptools.build_meta"

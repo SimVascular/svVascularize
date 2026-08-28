@@ -189,7 +189,7 @@ python -m svv.visualize.gui --domain path/to/domain.dmn</code></pre>
 
     <div class="callout warning">
       <strong>NumPy compatibility:</strong>
-      <p style="margin:.5rem 0 0">If importing the GUI fails with <code>_ARRAY_API not found</code> or <code>numpy.core.multiarray failed to import</code>, the environment likely mixed <code>numpy&gt;=2</code> with an older compiled dependency. Reinstall in a clean environment with <code>python -m pip install --force-reinstall "numpy&lt;2" svv</code>.</p>
+      <p style="margin:.5rem 0 0">If importing the GUI fails with <code>_ARRAY_API not found</code> or <code>numpy.core.multiarray failed to import</code>, recreate the environment with a NumPy version supported by your Python version. On Python 3.9–3.12, use <code>python -m pip install --force-reinstall "numpy&lt;2" svv</code>. Python 3.13 requires NumPy 2.1 or newer; use <code>python -m pip install --force-reinstall "numpy&gt;=2.1" svv</code>.</p>
     </div>
   </main>
 
