@@ -7,10 +7,8 @@
 [![codecov](https://codecov.io/github/SimVascular/svVascularize/graph/badge.svg)](https://codecov.io/github/SimVascular/svVascularize)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15151168.svg)](https://doi.org/10.5281/zenodo.15151168)
 [![Docs](https://img.shields.io/badge/docs-gh--pages-brightgreen)](https://simvascular.github.io/svVascularize/)
-[![Telemetry](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zasexton/svVascularize/main/docs/badges/telemetry.json)](https://sentry.io)
-<!-- smoke-test-badge -->
-[![SVV passing](https://img.shields.io/static/v1?label=svv%20passing&message=linux%20ok%20%7C%20macos%20ok%20%7C%20windows%20ok&color=brightgreen)](https://github.com/SimVascular/svVascularize/actions/workflows/basic-smoke-test.yml?query=branch%3Amain)
-<!-- /smoke-test-badge -->
+[![Telemetry](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/SimVascular/svVascularize/badge-data/telemetry.json)](https://sentry.io)
+[![Basic smoke test](https://github.com/SimVascular/svVascularize/actions/workflows/basic-smoke-test.yml/badge.svg?branch=main&event=push)](https://github.com/SimVascular/svVascularize/actions/workflows/basic-smoke-test.yml?query=branch%3Amain)
 
 <p align="left">
 The svVascularize (svv) is an open-source API for automated vascular generation and multi-fidelity hemodynamic simulation

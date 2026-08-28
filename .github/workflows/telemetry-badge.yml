@@ -1,15 +1,23 @@
 name: Telemetry Badge
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/telemetry-badge.yml
   schedule:
     - cron: "0 6 * * *"  # daily at 06:00 UTC
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   update-badge:
+    if: ${{ github.repository == 'SimVascular/svVascularize' }}
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -20,12 +28,9 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          BADGE_PATH: docs/badges/telemetry.json
+          BADGE_PATH: ${{ runner.temp }}/telemetry.json
         run: |
           set -euo pipefail
-          if grep -q "__BADGE_REPO__" README.md; then
-            sed -i "s#__BADGE_REPO__#${GITHUB_REPOSITORY}#g" README.md
-          fi
           python - <<'PY'
           import json
           import os
@@ -38,7 +43,7 @@ jobs:
           token = os.environ.get("SENTRY_AUTH_TOKEN", "").strip()
           org = os.environ.get("SENTRY_ORG", "").strip()
           project = os.environ.get("SENTRY_PROJECT", "").strip()
-          badge_path = Path(os.environ.get("BADGE_PATH", "docs/badges/telemetry.json"))
+          badge_path = Path(os.environ.get("BADGE_PATH", "telemetry.json"))
 
           if not token or not org or not project:
               sys.exit("Sentry credentials (SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT) are required.")
@@ -121,8 +126,16 @@ jobs:
           print(f"Wrote badge to {badge_path} with count={count}, version={message_suffix}")
           PY
 
-      - name: Commit badge update
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update telemetry badge"
-          file_pattern: docs/badges/telemetry.json README.md
+      - name: Publish badge data
+        env:
+          BADGE_PATH: ${{ runner.temp }}/telemetry.json
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan badge-data
+          git rm -rf .
+          cp "${BADGE_PATH}" telemetry.json
+          git add telemetry.json
+          git commit -m "chore: update telemetry badge"
+          git push --force origin HEAD:badge-data
