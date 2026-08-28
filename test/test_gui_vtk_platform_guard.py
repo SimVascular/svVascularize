@@ -11,6 +11,21 @@ import svv.visualize.gui.vtk_widget as vtk_widget_mod
 from svv.visualize.gui.vtk_widget import VTKWidget
 
 
+class _RenderCountingPlotter:
+    def __init__(self):
+        self.render_count = 0
+
+    def render(self):
+        self.render_count += 1
+
+
+def _dispose_widget(app, widget):
+    widget._render_timer.stop()
+    widget.plotter = None
+    widget.deleteLater()
+    app.processEvents()
+
+
 def test_vtk_widget_disables_vtk_for_offscreen_qt(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     monkeypatch.delenv("SVV_GUI_DISABLE_VTK", raising=False)
@@ -74,3 +89,46 @@ def test_build_vessel_tube_mesh_batches_segments():
     assert mesh is not None
     assert mesh.n_points > 0
     assert mesh.n_cells > 0
+
+
+def test_request_render_coalesces_pending_requests(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    widget = VTKWidget()
+    plotter = _RenderCountingPlotter()
+    widget.plotter = plotter
+
+    widget.request_render()
+    widget.request_render()
+    widget.request_render(delay_ms=10)
+
+    assert plotter.render_count == 0
+    assert widget._render_timer.isActive()
+
+    app.processEvents()
+
+    assert plotter.render_count == 1
+    _dispose_widget(app, widget)
+
+
+def test_batch_render_defers_nested_requests(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    widget = VTKWidget()
+    plotter = _RenderCountingPlotter()
+    widget.plotter = plotter
+
+    with widget.batch_render():
+        widget.request_render()
+        with widget.batch_render():
+            widget.request_render(immediate=True)
+        assert plotter.render_count == 0
+        assert not widget._render_timer.isActive()
+
+    assert plotter.render_count == 0
+    assert widget._render_timer.isActive()
+
+    app.processEvents()
+
+    assert plotter.render_count == 1
+    _dispose_widget(app, widget)
