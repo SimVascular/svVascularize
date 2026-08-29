@@ -2,6 +2,7 @@
 
 
 [![Version](https://img.shields.io/pypi/v/svv.svg?logo=pypi&label=PyPI%20version)](https://pypi.org/project/svv/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/svv.svg?logo=pypi&label=downloads%2Fmonth)](https://pypistats.org/packages/svv)
 ![Platform](https://img.shields.io/badge/platform-macOS%20|%20linux%20|%20windows-blue)
 ![Latest Release](https://img.shields.io/github/v/release/SimVascular/svVascularize?label=latest)
 [![codecov](https://codecov.io/github/SimVascular/svVascularize/graph/badge.svg)](https://codecov.io/github/SimVascular/svVascularize)
