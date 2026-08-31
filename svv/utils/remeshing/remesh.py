@@ -16,6 +16,234 @@ from typing import Sequence, Optional
 
 from .mmg import run_mmg
 
+
+# MMG rejects an input mesh when its normalized minimum element quality is
+# below MMG5_NULKAL.  Keeping the same conservative floor here prevents
+# mathematically degenerate triangles from reaching the executable without
+# discarding merely low-quality triangles that MMG is intended to improve.
+_MMG_MIN_TRIANGLE_QUALITY = 1.0e-30
+
+
+def _copy_polygon_surface(surface):
+    """Return a deep, polygon-only copy while preserving associated data."""
+    points = numpy.asarray(surface.points)
+    faces = numpy.asarray(surface.faces)
+    copied = pv.PolyData(numpy.array(points, copy=True), numpy.array(faces, copy=True))
+
+    for name in surface.point_data.keys():
+        copied.point_data[name] = numpy.array(surface.point_data[name], copy=True)
+
+    polygon_count = copied.n_cells
+    polygon_start = int(surface.GetNumberOfVerts() + surface.GetNumberOfLines())
+    for name in surface.cell_data.keys():
+        values = numpy.asarray(surface.cell_data[name])
+        if values.shape[0] != surface.n_cells:
+            raise ValueError(
+                f"Cell-data array {name!r} has {values.shape[0]} values for "
+                f"{surface.n_cells} cells."
+            )
+        copied.cell_data[name] = numpy.array(
+            values[polygon_start:polygon_start + polygon_count], copy=True
+        )
+
+    for name in surface.field_data.keys():
+        copied.field_data[name] = numpy.array(surface.field_data[name], copy=True)
+
+    return copied
+
+
+def _triangle_qualities(points, triangles):
+    """Compute the dimensionless isotropic triangle quality used by MMGS."""
+    triangle_points = points[triangles]
+    ab = triangle_points[:, 1] - triangle_points[:, 0]
+    ac = triangle_points[:, 2] - triangle_points[:, 0]
+    bc = triangle_points[:, 2] - triangle_points[:, 1]
+    with numpy.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        denominator = (
+            numpy.einsum("ij,ij->i", ab, ab)
+            + numpy.einsum("ij,ij->i", ac, ac)
+            + numpy.einsum("ij,ij->i", bc, bc)
+        )
+        quality = numpy.linalg.norm(numpy.cross(ab, ac), axis=1) / denominator
+    return quality, denominator
+
+
+def _normalize_required_triangles(required_triangles, triangle_count):
+    """Validate MMG's one-based required-triangle indices."""
+    if required_triangles is None:
+        return None
+
+    try:
+        values = list(required_triangles)
+    except TypeError as exc:
+        raise ValueError("required_triangles must be a one-dimensional sequence of integers") from exc
+
+    normalized = []
+    for value in values:
+        if isinstance(value, (bool, numpy.bool_)) or not isinstance(value, (int, numpy.integer)):
+            raise ValueError("required_triangles must contain only integer indices")
+        index = int(value)
+        if index < 1 or index > triangle_count:
+            raise ValueError(
+                f"required triangle index {index} is outside the valid one-based range "
+                f"[1, {triangle_count}]"
+            )
+        normalized.append(index)
+    return normalized
+
+
+def _prepare_surface_for_mmgs(
+        surface, required_triangles=None, verbosity=1,
+        quality_threshold=_MMG_MIN_TRIANGLE_QUALITY):
+    """Validate and remove triangles that MMGS cannot accept.
+
+    Point ordering and point count are deliberately preserved so an existing
+    per-vertex Medit solution remains aligned with the surface.  Returned
+    required-triangle indices use MMG's one-based convention.
+    """
+    if not hasattr(surface, "points") or not hasattr(surface, "faces"):
+        raise TypeError("remesh_surface requires a polygonal surface with points and faces")
+    if quality_threshold < 0.0 or not numpy.isfinite(quality_threshold):
+        raise ValueError("quality_threshold must be a finite, non-negative value")
+
+    mesh = _copy_polygon_surface(surface)
+    if mesh.n_points == 0 or mesh.n_cells == 0:
+        raise ValueError(
+            f"Cannot remesh an empty surface (points={mesh.n_points}, triangles=0)."
+        )
+
+    points = numpy.asarray(mesh.points, dtype=float)
+    original_points = numpy.array(points, copy=True)
+    finite_points = numpy.all(numpy.isfinite(points), axis=1)
+    if not numpy.all(finite_points):
+        invalid_points = (numpy.flatnonzero(~finite_points) + 1).tolist()
+        preview = invalid_points[:10]
+        suffix = "..." if len(invalid_points) > len(preview) else ""
+        raise ValueError(
+            f"Surface contains {len(invalid_points)} point(s) with non-finite coordinates; "
+            f"one-based point indices: {preview}{suffix}."
+        )
+
+    if required_triangles is not None and not mesh.is_all_triangles:
+        raise ValueError(
+            "remesh_surface(required_triangles=...) requires the input surface to be all triangles "
+            "(so indices match). Triangulate the mesh first."
+        )
+    if not mesh.is_all_triangles:
+        mesh = mesh.triangulate(inplace=False)
+
+    if mesh.n_cells == 0 or not mesh.is_all_triangles:
+        raise ValueError("Surface triangulation did not produce any triangular faces.")
+    if (
+            mesh.n_points != original_points.shape[0]
+            or not numpy.array_equal(numpy.asarray(mesh.points), original_points)):
+        raise ValueError(
+            "Surface triangulation changed point ordering, which would invalidate per-vertex sizing data."
+        )
+    points = numpy.asarray(mesh.points, dtype=float)
+
+    face_records = numpy.asarray(mesh.faces).reshape(-1, 4)
+    triangles = face_records[:, 1:].astype(numpy.int64, copy=False)
+    triangle_count = triangles.shape[0]
+    normalized_required = _normalize_required_triangles(required_triangles, triangle_count)
+
+    if numpy.any(triangles < 0) or numpy.any(triangles >= mesh.n_points):
+        raise ValueError("Surface contains a triangle with an out-of-range point index.")
+
+    repeated_indices = (
+        (triangles[:, 0] == triangles[:, 1])
+        | (triangles[:, 0] == triangles[:, 2])
+        | (triangles[:, 1] == triangles[:, 2])
+    )
+    quality, denominator = _triangle_qualities(points, triangles)
+
+    valid = (
+        ~repeated_indices
+        & numpy.isfinite(quality)
+        & (denominator > 0.0)
+        & (quality > quality_threshold)
+    )
+    invalid_zero_based = numpy.flatnonzero(~valid)
+    invalid_one_based = (invalid_zero_based + 1).tolist()
+
+    if normalized_required is not None:
+        invalid_required = [index for index in normalized_required if not valid[index - 1]]
+        if invalid_required:
+            raise ValueError(
+                "Required triangle(s) are degenerate and cannot be passed to MMGS: "
+                f"{invalid_required}."
+            )
+
+    finite_quality = quality[numpy.isfinite(quality)]
+    minimum_quality = float(numpy.min(finite_quality)) if finite_quality.size else None
+
+    if invalid_zero_based.size:
+        retained_triangles = triangles[valid]
+        if retained_triangles.shape[0] == 0:
+            raise ValueError(
+                f"Surface has no MMGS-compatible triangles; rejected all {triangle_count} faces."
+            )
+
+        vtk_faces = numpy.hstack((
+            numpy.full((retained_triangles.shape[0], 1), 3, dtype=numpy.int64),
+            retained_triangles,
+        )).ravel()
+        sanitized = pv.PolyData(numpy.array(mesh.points, copy=True), vtk_faces)
+        for name in mesh.point_data.keys():
+            sanitized.point_data[name] = numpy.array(mesh.point_data[name], copy=True)
+        for name in mesh.cell_data.keys():
+            sanitized.cell_data[name] = numpy.array(mesh.cell_data[name][valid], copy=True)
+        for name in mesh.field_data.keys():
+            sanitized.field_data[name] = numpy.array(mesh.field_data[name], copy=True)
+        mesh = sanitized
+
+        if normalized_required is not None:
+            new_indices = numpy.cumsum(valid, dtype=numpy.int64)
+            normalized_required = [int(new_indices[index - 1]) for index in normalized_required]
+
+        if verbosity is not None and verbosity > 0:
+            preview = invalid_one_based[:10]
+            suffix = "..." if len(invalid_one_based) > len(preview) else ""
+            print(
+                f"Removed {len(invalid_one_based)} MMGS-incompatible triangle(s); "
+                f"one-based indices: {preview}{suffix}."
+            )
+
+    retained_face_records = numpy.asarray(mesh.faces).reshape(-1, 4)
+    retained_triangles = retained_face_records[:, 1:].astype(numpy.int64, copy=False)
+    retained_quality, _ = _triangle_qualities(
+        numpy.asarray(mesh.points, dtype=float), retained_triangles
+    )
+    if (
+            not numpy.all(numpy.isfinite(retained_quality))
+            or numpy.any(retained_quality <= quality_threshold)):
+        raise ValueError("Surface still contains an MMGS-incompatible triangle after sanitization.")
+
+    diagnostics = {
+        "original_point_count": int(points.shape[0]),
+        "original_triangle_count": int(triangle_count),
+        "triangle_count": int(mesh.n_cells),
+        "invalid_triangle_count": int(invalid_zero_based.size),
+        "invalid_triangle_indices": invalid_one_based,
+        "minimum_quality": minimum_quality,
+        "sanitized_minimum_quality": float(numpy.min(retained_quality)),
+        "quality_threshold": float(quality_threshold),
+    }
+    return mesh, normalized_required, diagnostics
+
+
+def _surface_topology_diagnostics(surface):
+    """Return best-effort topology values for a remeshing error message."""
+    try:
+        manifold = bool(surface.is_manifold)
+    except Exception:
+        manifold = None
+    try:
+        open_edges = int(surface.n_open_edges)
+    except Exception:
+        open_edges = None
+    return manifold, open_edges
+
 def remesh_surface_2d(boundary, autofix=False, ar=None, hausd=None, hgrad=None, verbosity=1,
                    hmax=None, hmin=None, hsiz=None, noinsert=None, nomove=None, nosurf=True,
                    noswap=None, nr=None, optim=None, rn=None, nsd=None):
@@ -313,8 +541,9 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         The 3D surface mesh to be remeshed.
 
     autofix : bool, optional
-        If True, attempts to automatically fix non-manifold issues in the remeshed surface using pymeshfix.
-        Default is True.
+        If True, attempts to fix non-manifold issues in the MMGS output using
+        pymeshfix. Invalid input triangles are removed before MMGS regardless
+        of this setting. Default is True.
 
     ar : float, optional
         Anisotropy ratio. See MMGS documentation for details.
@@ -359,7 +588,9 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         Removes nonmanifold elements. See MMGS documentation.
 
     required_triangles : list of int, optional
-        List of triangle indices that are required and should not be modified during remeshing.
+        One-based triangle indices that are required and should not be modified
+        during remeshing. Indices are remapped if earlier invalid faces are
+        removed. An invalid required face raises ``ValueError``.
 
     Returns
     -------
@@ -368,13 +599,19 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
 
     Raises
     ------
+    ValueError
+        If the input is empty, contains non-finite points, has no
+        MMGS-compatible triangles, or protects an invalid triangle.
     NotImplementedError
         If the remeshing process does not produce triangular faces.
+    RuntimeError
+        If MMGS rejects the sanitized surface.
 
     Notes
     -----
-    This function utilizes the MMGS executable to perform remeshing. The MMG executables must be present in
-    the appropriate directory for your operating system.
+    This function removes only triangles that fail MMGS's minimum input-quality
+    requirement before invoking the MMGS executable. The MMG executables must
+    be present in the appropriate directory for your operating system.
 
     References
     ----------
@@ -409,14 +646,11 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         boundary = pv.Circle()
         remeshed = remesh_surface_2d(boundary, hmax=0.2, hmin=0.05, hausd=0.01, verbosity=3)
     """
-    _mesh_ = pv.PolyData(pv_polydata_object.points, pv_polydata_object.faces)
-    if required_triangles is not None and (not _mesh_.is_all_triangles):
-        raise ValueError(
-            "remesh_surface(required_triangles=...) requires the input surface to be all triangles "
-            "(so indices match). Triangulate the mesh first."
-        )
-    if not _mesh_.is_all_triangles:
-        _mesh_ = _mesh_.triangulate(inplace=False)
+    _mesh_, required_triangles, input_diagnostics = _prepare_surface_for_mmgs(
+        pv_polydata_object,
+        required_triangles=required_triangles,
+        verbosity=verbosity,
+    )
 
     # Run MMG in an isolated temp directory to avoid permission issues and temp-file collisions.
     tmp_root = None
@@ -474,10 +708,23 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         if rn is not None:
             args.extend(["-rn", str(rn)])
 
-        if verbosity == 0:
-            run_mmg("mmgs", args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=tmpdir)
-        else:
-            run_mmg("mmgs", args, cwd=tmpdir)
+        try:
+            if verbosity == 0:
+                run_mmg("mmgs", args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=tmpdir)
+            else:
+                run_mmg("mmgs", args, cwd=tmpdir)
+        except subprocess.CalledProcessError as exc:
+            manifold, open_edges = _surface_topology_diagnostics(_mesh_)
+            invalid_indices = input_diagnostics["invalid_triangle_indices"][:10]
+            raise RuntimeError(
+                "MMGS surface remeshing failed after input sanitization "
+                f"(points={_mesh_.n_points}, triangles={_mesh_.n_cells}, "
+                f"removed_invalid_triangles={input_diagnostics['invalid_triangle_count']}, "
+                f"invalid_triangle_indices={invalid_indices}, "
+                f"minimum_retained_quality={input_diagnostics['sanitized_minimum_quality']:.6e}, "
+                f"manifold={manifold}, open_edges={open_edges}, args={args!r}, "
+                f"returncode={exc.returncode})."
+            ) from exc
         mmg_succeeded = True
 
         out_mesh_path = tmpdir_path / "tmp.o.mesh"
@@ -497,9 +744,7 @@ def remesh_surface(pv_polydata_object, autofix=True, ar=None, hausd=None, hgrad=
         if autofix:
             if not remeshed_surface.is_manifold:
                 fix = pymeshfix.MeshFix(remeshed_surface)
-                if verbosity == 0:
-                    fix.repair(verbose=False)
-                fix.repair(verbose=True)
+                fix.repair(verbose=verbosity != 0)
                 remeshed_surface = fix.mesh
 
     # Clean up sizing file if provided (historical behavior)
