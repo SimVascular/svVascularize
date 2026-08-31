@@ -818,7 +818,7 @@ def union_tubes(tubes, lines, cap_resolution=40):
                 total_steps=total_steps,
                 tube_index=i,
             )
-    model.cell_data['hsize'] = 0
+    model.cell_data['hsize'] = numpy.zeros(model.n_cells, dtype=float)
     model.cell_data['hsize'][0] = hsize
     return model
 
@@ -1061,7 +1061,7 @@ def union_tubes_balanced(tubes, lines, cap_resolution=40, method='centerline', e
     #fix.repair()
     #model = fix.mesh
     if hsize is not None:
-        model.cell_data['hsize'] = 0
+        model.cell_data['hsize'] = _np.zeros(model.n_cells, dtype=float)
         model.cell_data['hsize'][0] = hsize
     return model
 
