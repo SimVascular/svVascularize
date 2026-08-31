@@ -68,7 +68,7 @@
             <h2>Quick Example</h2>
             <pre data-copy><code class="language-python">import numpy as np
 import pyvista as pv
-from svv.domain.domain import Domain
+from svv.domain import Domain
 
 # Create domain from PyVista mesh
 mesh = pv.read('vessel_geometry.stl')
@@ -491,7 +491,7 @@ boundary_points = domain.get_boundary_points(n=500)</code></pre>
 
                     <div class="api-example">
                         <h4>Save/Load Example</h4>
-                        <pre data-copy><code class="language-python">from svv.domain.domain import Domain
+                        <pre data-copy><code class="language-python">from svv.domain import Domain
 import pyvista as pv
 
 # Create domain from a complex mesh
@@ -552,7 +552,7 @@ difference_domain = domain1 - domain2</code></pre>
                     <div class="api-example">
                         <h3>Creating a Domain from STL File</h3>
                         <pre data-copy><code class="language-python">import pyvista as pv
-from svv.domain.domain import Domain
+from svv.domain import Domain
 
 # Load STL file
 mesh = pv.read('vessel.stl')
@@ -574,7 +574,7 @@ print(f"Convexity: {domain.convexity:.3f}")</code></pre>
                     <div class="api-example">
                         <h3>Customized Patch Allocation</h3>
                         <pre data-copy><code class="language-python">import pyvista as pv
-from svv.domain.domain import Domain
+from svv.domain import Domain
 
 mesh = pv.read('vessel.stl')
 domain = Domain(mesh)

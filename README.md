@@ -50,3 +50,18 @@ python -m pip install --force-reinstall "numpy>=2.1" svv
 
 On clusters / HPC systems (for example Stanford Sherlock), use a recent Python (3.9–3.13) and `pip`, and install into a
 clean virtual environment or user site-packages.
+
+## Basic usage
+
+Import the primary classes from the root package and supporting types from
+their public subpackages:
+
+```python
+from svv import Domain, Forest, Simulation, Tree
+from svv.domain import Patch
+from svv.tree import TreeParameters, UnitSystem
+```
+
+`dir(svv)` lists the curated root API. Explicit imports are recommended for
+application code, and existing deep import paths remain supported for
+compatibility.

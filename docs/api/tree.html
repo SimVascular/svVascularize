@@ -66,8 +66,8 @@
         <!-- Quick Example -->
         <div class="api-quick-example">
             <h2>Quick Example</h2>
-            <pre data-copy><code class="language-python">from svv.tree.tree import Tree
-from svv.domain.domain import Domain
+            <pre data-copy><code class="language-python">from svv.tree import Tree
+from svv.domain import Domain
 import pyvista as pv
 
 # Create domain from mesh
@@ -166,9 +166,9 @@ centerlines, polys = tree.export_centerlines()</code></pre>
 
                     <div class="api-example">
                         <h4>Constructor Examples</h4>
-                        <pre data-copy><code class="language-python">from svv.tree.tree import Tree
-from svv.tree.data.data import TreeParameters
-from svv.tree.data.units import UnitSystem
+                        <pre data-copy><code class="language-python">from svv.tree import Tree
+from svv.tree import TreeParameters
+from svv.tree import UnitSystem
 
 # Default tree (CGS units)
 tree = Tree()
@@ -427,8 +427,8 @@ tree_small = Tree(preallocation_step=10000)</code></pre>
 
                     <div class="api-example">
                         <h4>TreeParameters Examples</h4>
-                        <pre data-copy><code class="language-python">from svv.tree.data.data import TreeParameters
-from svv.tree.data.units import UnitSystem
+                        <pre data-copy><code class="language-python">from svv.tree import TreeParameters
+from svv.tree import UnitSystem
 
 # Create parameters with defaults
 params = TreeParameters()
@@ -633,8 +633,8 @@ params.set_unit_system(si_system, convert_existing=True)</code></pre>
 
                     <div class="api-example">
                         <h4>Save/Load Example</h4>
-                        <pre data-copy><code class="language-python">from svv.tree.tree import Tree
-from svv.domain.domain import Domain
+                        <pre data-copy><code class="language-python">from svv.tree import Tree
+from svv.domain import Domain
 import pyvista as pv
 
 # Create and grow a tree
@@ -696,8 +696,8 @@ loaded_tree.show()</code></pre>
 
                     <div class="api-example">
                         <h3>Basic Tree Generation</h3>
-                        <pre data-copy><code class="language-python">from svv.tree.tree import Tree
-from svv.domain.domain import Domain
+                        <pre data-copy><code class="language-python">from svv.tree import Tree
+from svv.domain import Domain
 import numpy as np
 import pyvista as pv
 

@@ -66,8 +66,8 @@
         <!-- Quick Example -->
         <div class="api-quick-example">
             <h2>Quick Example</h2>
-            <pre data-copy><code class="language-python">from svv.forest.forest import Forest
-from svv.domain.domain import Domain
+            <pre data-copy><code class="language-python">from svv.forest import Forest
+from svv.domain import Domain
 import numpy as np
 import pyvista as pv
 
@@ -441,8 +441,8 @@ forest.show(plot_domain=True)</code></pre>
 
                     <div class="api-example">
                         <h4>Save/Load Example</h4>
-                        <pre data-copy><code class="language-python">from svv.forest.forest import Forest
-from svv.domain.domain import Domain
+                        <pre data-copy><code class="language-python">from svv.forest import Forest
+from svv.domain import Domain
 import pyvista as pv
 
 # Create and grow a forest
@@ -486,8 +486,8 @@ loaded_forest.add(25)</code></pre>
 
                     <div class="api-example">
                         <h3>Arterial-Venous Network</h3>
-                        <pre data-copy><code class="language-python">from svv.forest.forest import Forest
-from svv.domain.domain import Domain
+                        <pre data-copy><code class="language-python">from svv.forest import Forest
+from svv.domain import Domain
 import numpy as np
 import pyvista as pv
 
@@ -531,7 +531,7 @@ forest.show(colors=['red', 'blue'], plot_domain=True)</code></pre>
 
                     <div class="api-example">
                         <h3>Multi-Tree Network with Connections</h3>
-                        <pre data-copy><code class="language-python">from svv.forest.forest import Forest
+                        <pre data-copy><code class="language-python">from svv.forest import Forest
 import numpy as np
 # Create forest with multiple trees per network
 forest = Forest(
@@ -573,7 +573,7 @@ for i in range(forest.n_networks):
                     <div class="api-example">
                         <h3>Competitive Growth Pattern</h3>
                         <pre data-copy><code class="language-python"># Enable competition between networks
-from svv.forest.forest import Forest
+from svv.forest import Forest
 import numpy as np
 forest = Forest(
     domain=domain,

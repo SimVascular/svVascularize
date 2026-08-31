@@ -156,10 +156,7 @@ def _smoke_gui(timeout_s: int = 45) -> None:
 def main() -> None:
     import pyvista as pv
 
-    from svv.domain.domain import Domain
-    from svv.forest.forest import Forest
-    from svv.tree.tree import Tree
-    from svv.simulation.simulation import Simulation
+    from svv import Domain, Forest, Simulation, Tree
     from svv.utils.remeshing.mmg import get_mmg_candidates, get_mmg_exe
     from svv.utils.solvers.solver_0d import get_solver_0d_candidates, get_solver_0d_exe
     from svv.utils.remeshing.remesh import remesh_surface

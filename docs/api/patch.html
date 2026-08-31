@@ -67,7 +67,7 @@
         <div class="api-quick-example">
             <h2>Quick Example</h2>
             <pre data-copy><code class="language-python">import numpy as np
-from svv.domain.patch import Patch
+from svv.domain import Patch
 
 # Create a patch with points and normals
 points = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
@@ -308,7 +308,7 @@ values = interpolation_func(test_points)</code></pre>
                     <div class="api-example">
                         <h3>Basic Patch Interpolation</h3>
                         <pre data-copy><code class="language-python">import numpy as np
-from svv.domain.patch import Patch
+from svv.domain import Patch
 
 # Create sample points on a sphere
 theta = np.linspace(0, np.pi, 10)

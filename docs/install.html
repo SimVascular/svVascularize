@@ -266,10 +266,13 @@ python -m pip install -e .[dev]</code></pre>
     <!-- VERIFY -->
     <section id="verify">
       <h2>Verifying the installation</h2>
-        <p>After installing svVascularize, verify the installation version by running the following
-            scripts in the Python interpreter.</p>
+        <p>After installing svVascularize, verify the version and public component imports by running
+            the following script in the Python interpreter.</p>
         <pre data-copy><code class="language-python">import svv
-print(svv.__version__)</code></pre>
+from svv import Domain, Forest, Simulation, Tree
+
+print(svv.__version__)
+print([name for name in ("Domain", "Forest", "Simulation", "Tree") if name in dir(svv)])</code></pre>
         <p>To test that individual components of the package are correctly installed and operational
         run the test suite associated with the module from the terminal or shell.</p>
       <pre data-copy><code class="language-shell">python -m svv.tests</code></pre>

@@ -33,8 +33,8 @@
 
     <h3>Generate and visualise a tree</h3>
     <pre data-copy><code class="language-python">import pyvista as pv
-from svv.domain.domain import Domain
-from svv.tree.tree import Tree
+from svv.domain import Domain
+from svv.tree import Tree
 
 # Creating the Tissue Domain
 cube = Domain(pv.Cube())
@@ -70,8 +70,8 @@ export_0d_simulation(t, outdir="my_tree_0d")
     with a desired number of inlets and outlets. These are especially useful for fabrication and fluid routing problems in which
       control over the start/end points are critical.</p>
         <pre data-copy><code class="language-python">import pyvista as pv
-from svv.domain.domain import Domain
-from svv.forest.forest import Forest
+from svv.domain import Domain
+from svv.forest import Forest
 
 # Creating the Tissue Domain
 cube = Domain(pv.Cube())

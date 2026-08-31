@@ -35,9 +35,9 @@
          which can be used to wrap around synthetic vascular objects in order to build simulation files. We will
          demonstrate the basic API below for a simple vascular tree. </p>
      <pre data-copy> <code class="language-python">import pyvista as pv
- from svv.domain.domain import Domain
- from svv.tree.tree import Tree
- from svv.simulation.simulation import Simulation
+ from svv.domain import Domain
+ from svv.tree import Tree
+ from svv.simulation import Simulation
 
  cube = Domain(pv.Cube())
  cube.create()

@@ -68,7 +68,7 @@
         <!-- Quick Example -->
         <div class="api-quick-example">
             <h2>Quick Example</h2>
-            <pre data-copy><code class="language-python">from svv.simulation.simulation import Simulation
+            <pre data-copy><code class="language-python">from svv.simulation import Simulation
 # Assumes `tree` is an existing svv.tree.Tree built as in the Quickstart
 
 # Create simulation from tree
@@ -425,9 +425,9 @@ sim.construct_1d_fluid_simulation(
 
                     <div class="api-example">
                         <h3>Complete 3D CFD Simulation Setup</h3>
-                        <pre data-copy><code class="language-python">from svv.simulation.simulation import Simulation
-from svv.tree.tree import Tree
-from svv.domain.domain import Domain
+                        <pre data-copy><code class="language-python">from svv.simulation import Simulation
+from svv.tree import Tree
+from svv.domain import Domain
 import pyvista as pv
 
 # Generate vascular tree

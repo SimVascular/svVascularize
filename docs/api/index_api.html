@@ -76,6 +76,19 @@
             </div>
         </div>
 
+        <section id="public-imports" class="api-section">
+            <h2>Public imports</h2>
+            <p>
+                The root package exposes the primary workflow classes, while public subpackages expose supporting
+                types. Calling <code>dir(svv)</code> reports the supported root namespace, and both import styles
+                resolve to the same class objects.
+            </p>
+            <pre data-copy><code class="language-python">import svv
+from svv import Domain, Forest, Simulation, Tree
+from svv.domain import Patch
+from svv.tree import TreeParameters, UnitSystem</code></pre>
+        </section>
+
         <!-- Quick Start Section
         <section id="quickstart" class="api-section">
             <h2>Quick Start</h2>
@@ -85,10 +98,10 @@
 
             <h3>Basic Import</h3>
             <pre data-copy><code class="language-python">import svv
-from svv.domain.domain import Domain
-from svv.forest.forest import Forest
-from svv.tree.tree import Tree
-from svv.simulation.simulation import Simulation
+from svv.domain import Domain
+from svv.forest import Forest
+from svv.tree import Tree
+from svv.simulation import Simulation
 
 # Create a domain
 domain = Domain()
@@ -190,7 +203,7 @@ results = sim.run()</code></pre>
                         </div>
                         <div class="api-example">
                             <h4>Example Usage</h4>
-                            <pre data-copy><code class="language-python">from svv.domain.domain import Domain
+                            <pre data-copy><code class="language-python">from svv.domain import Domain
 
 # Create a domain from a mesh
 import pyvista as pv
@@ -268,8 +281,8 @@ boundary, _ = domain.get_boundary(resolution=30)</code></pre>
                         <div class="api-example">
                             <h4>Example Usage</h4>
                             <pre data-copy><code class="language-python">import pyvista as pv
-from svv.domain.domain import Domain
-from svv.forest.forest import Forest
+from svv.domain import Domain
+from svv.forest import Forest
 
 # Prepare a domain and build its implicit representation
 domain = Domain(pv.Cube())
@@ -399,7 +412,7 @@ forest.export_solid(outdir='forest_model')</code></pre>
 
                         <div class="api-example">
                             <h4>Example Usage</h4>
-                            <pre data-copy><code class="language-python">from svv.simulation.simulation import Simulation
+                            <pre data-copy><code class="language-python">from svv.simulation import Simulation
 from svv.simulation.fluid.rom.zero_d.zerod_tree import export_0d_simulation
 
 # Wrap a generated tree in a Simulation container
@@ -490,8 +503,8 @@ plotter.screenshot('forest_viz.png')</code></pre>
                 <div class="api-example-card">
                     <h3>Generate a Vascular Tree</h3>
                     <pre data-copy><code class="language-python">import pyvista as pv
-from svv.domain.domain import Domain
-from svv.tree.tree import Tree
+from svv.domain import Domain
+from svv.tree import Tree
 
 domain = Domain(pv.Cube())
 domain.create()
