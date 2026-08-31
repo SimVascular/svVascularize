@@ -158,8 +158,11 @@ class Domain(object):
                 self.n = self.points.shape[0]
                 self.d = self.points.shape[1]
             elif 'pyvista' in str(args[0].__class__):
-                points, normals, n, d = read(args[0], **kwargs)
-                self.original_boundary = args[0]
+                boundary = args[0]
+                if isinstance(boundary, pv.UnstructuredGrid):
+                    boundary = boundary.extract_surface()
+                points, normals, n, d = read(boundary, **kwargs)
+                self.original_boundary = boundary
                 self.points = points
                 self.normals = normals
                 self.n = n
