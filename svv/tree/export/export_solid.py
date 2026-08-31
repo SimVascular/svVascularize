@@ -7,7 +7,11 @@ import pymeshfix
 from tqdm import trange, tqdm
 from scipy.interpolate import splprep, splev
 from scipy.spatial import cKDTree
-from svv.utils.remeshing.remesh import remesh_surface, write_medit_sol
+from svv.utils.remeshing.remesh import (
+    _prepare_surface_for_mmgs,
+    remesh_surface,
+    write_medit_sol,
+)
 from svv.domain.routines.boolean import boolean
 
 
@@ -680,6 +684,102 @@ def generate_tubes_parallel(polylines, hsize=None, processes=None, chunksize=1, 
         tubes.append(tube)
     return tubes
 
+def _surface_topology(surface):
+    """Return manifold and open-edge state for a polygonal surface."""
+    try:
+        manifold = bool(surface.is_manifold)
+        open_edges = int(surface.n_open_edges)
+    except Exception as exc:
+        raise RuntimeError("Unable to inspect the tube-union surface topology.") from exc
+    return manifold, open_edges
+
+
+def _prepare_watertight_union_surface(surface, *, step, total_steps):
+    """Sanitize and, when needed, repair a watertight union intermediate."""
+    context = f"Tube union step {step}/{total_steps}"
+    try:
+        prepared, _, diagnostics = _prepare_surface_for_mmgs(surface, verbosity=1)
+    except Exception as exc:
+        raise RuntimeError(f"{context} produced an invalid surface: {exc}") from exc
+
+    manifold, open_edges = _surface_topology(prepared)
+    repaired = False
+    removed_triangles = diagnostics["invalid_triangle_count"]
+    invalid_indices = diagnostics["invalid_triangle_indices"][:10]
+
+    if not manifold or open_edges != 0:
+        repaired = True
+        before_points = prepared.n_points
+        before_triangles = prepared.n_cells
+        try:
+            fix = pymeshfix.MeshFix(prepared)
+            fix.repair(verbose=False)
+            prepared, _, repair_diagnostics = _prepare_surface_for_mmgs(
+                fix.mesh, verbosity=1
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"{context} could not repair its boolean result "
+                f"(points={before_points}, triangles={before_triangles}, "
+                f"removed_invalid_triangles={removed_triangles}, "
+                f"invalid_triangle_indices={invalid_indices}, "
+                f"manifold={manifold}, open_edges={open_edges})."
+            ) from exc
+        removed_triangles += repair_diagnostics["invalid_triangle_count"]
+
+    manifold, open_edges = _surface_topology(prepared)
+    if prepared.n_points == 0 or prepared.n_cells == 0 or not manifold or open_edges != 0:
+        raise RuntimeError(
+            f"{context} did not produce a watertight surface "
+            f"(points={prepared.n_points}, triangles={prepared.n_cells}, "
+            f"removed_invalid_triangles={removed_triangles}, repaired={repaired}, "
+            f"manifold={manifold}, open_edges={open_edges})."
+        )
+
+    return prepared, {
+        "removed_invalid_triangles": removed_triangles,
+        "invalid_triangle_indices": invalid_indices,
+        "repaired": repaired,
+    }
+
+
+def _union_and_remesh_tube(left, right, *, hsize, step, total_steps, tube_index):
+    """Perform one diagnosed, watertight boolean-union and remeshing step."""
+    context = f"Tube union step {step}/{total_steps} (adding tube index {tube_index})"
+    try:
+        model = boolean(left, right, operation='union', fix_mesh=False)
+    except Exception as exc:
+        raise RuntimeError(f"{context} failed during the boolean operation.") from exc
+
+    model, preparation = _prepare_watertight_union_surface(
+        model, step=step, total_steps=total_steps
+    )
+    model = model.compute_normals(auto_orient_normals=True)
+
+    try:
+        model = remesh_surface(model, hsiz=hsize)
+    except Exception as exc:
+        manifold, open_edges = _surface_topology(model)
+        raise RuntimeError(
+            f"{context} failed during surface remeshing "
+            f"(points={model.n_points}, triangles={model.n_cells}, hsiz={hsize:.15g}, "
+            f"removed_invalid_triangles={preparation['removed_invalid_triangles']}, "
+            f"invalid_triangle_indices={preparation['invalid_triangle_indices']}, "
+            f"repaired={preparation['repaired']}, manifold={manifold}, "
+            f"open_edges={open_edges})."
+        ) from exc
+
+    model = model.compute_normals(auto_orient_normals=True)
+    manifold, open_edges = _surface_topology(model)
+    if model.n_points == 0 or model.n_cells == 0 or not manifold or open_edges != 0:
+        raise RuntimeError(
+            f"{context} remeshing returned a non-watertight surface "
+            f"(points={model.n_points}, triangles={model.n_cells}, hsiz={hsize:.15g}, "
+            f"manifold={manifold}, open_edges={open_edges})."
+        )
+    return model
+
+
 def union_tubes(tubes, lines, cap_resolution=40):
     """
     This function performs iterative boolean union operations on a list of Pyvista polydata surface
@@ -695,18 +795,29 @@ def union_tubes(tubes, lines, cap_resolution=40):
     union : pyvista.PolyData
         The result of the boolean union operation.
     """
-    model = boolean(tubes[0], tubes[1], operation='union')
-    model = model.compute_normals(auto_orient_normals=True)
+    if len(tubes) < 2:
+        raise ValueError("union_tubes requires at least two tube surfaces")
+    if len(lines) != len(tubes):
+        raise ValueError("lines and tubes must have the same length")
+    if cap_resolution <= 0:
+        raise ValueError("cap_resolution must be positive")
+
+    total_steps = len(tubes) - 1
     hsize = (min(min(lines[0]['radius']), min(lines[1]['radius']))*2*numpy.pi)/cap_resolution
-    model = remesh_surface(model, hsiz=hsize)
-    model = model.compute_normals(auto_orient_normals=True)
+    model = _union_and_remesh_tube(
+        tubes[0], tubes[1], hsize=hsize, step=1, total_steps=total_steps, tube_index=1
+    )
     if len(tubes) > 2:
         for i in range(2, len(tubes)):
-            model = boolean(model, tubes[i], operation='union')
-            model = model.compute_normals(auto_orient_normals=True)
             hsize = min(hsize, (min(lines[i]['radius'])*2*numpy.pi)/cap_resolution)
-            model = remesh_surface(model, hsiz=hsize)
-            model = model.compute_normals(auto_orient_normals=True)
+            model = _union_and_remesh_tube(
+                model,
+                tubes[i],
+                hsize=hsize,
+                step=i,
+                total_steps=total_steps,
+                tube_index=i,
+            )
     model.cell_data['hsize'] = 0
     model.cell_data['hsize'][0] = hsize
     return model
@@ -731,22 +842,33 @@ def build_watertight_solid(tree, cap_resolution=40):
     lines = generate_polylines(xyz, r)
     tubes = generate_tubes(lines)
     model = union_tubes(tubes, lines, cap_resolution=cap_resolution)
+    if 'hsize' not in model.cell_data or model.n_cells == 0:
+        raise RuntimeError("Watertight tube union did not retain its target surface size.")
+    hsize = float(model.cell_data['hsize'][0])
     #tubes = generate_tubes_parallel(lines, radius_based=True)
     #model = union_tubes_balanced(tubes, lines, cap_resolution=cap_resolution)
     # Remove poor quality elements and repair the mesh.
     cell_quality = model.compute_cell_quality(quality_measure='scaled_jacobian')
-    keep = cell_quality.cell_data["CellQuality"] > 0.1
+    quality_values = numpy.asarray(cell_quality.cell_data["CellQuality"])
+    keep = numpy.isfinite(quality_values) & (quality_values > 0.1)
     if not numpy.all(keep):
-        print("Removing poor quality elements from the mesh.")
-        #keep = numpy.argwhere(keep).flatten()
-        #non_manifold_model = model.extract_cells(keep)
-        #non_manifold_model = non_manifold_model.extract_surface()
-        fix = pymeshfix.MeshFix(model) # non_manifold_model)
+        print("Repairing poor quality elements in the mesh.")
+        fix = pymeshfix.MeshFix(model)
         fix.repair(verbose=True)
-        hsize = model.cell_data["hsize"][0] #hsize
-        model = fix.mesh.compute_normals(auto_orient_normals=True)
-        #model.hsize = hsize
-        model.cell_data['hsize'] = 0
+        model, _ = _prepare_watertight_union_surface(
+            fix.mesh,
+            step=max(len(tubes) - 1, 1),
+            total_steps=max(len(tubes) - 1, 1),
+        )
+        model = model.compute_normals(auto_orient_normals=True)
+    manifold, open_edges = _surface_topology(model)
+    if not manifold or open_edges != 0:
+        raise RuntimeError(
+            "Final vascular solid is not watertight "
+            f"(points={model.n_points}, triangles={model.n_cells}, "
+            f"manifold={manifold}, open_edges={open_edges})."
+        )
+    model.cell_data['hsize'] = numpy.zeros(model.n_cells)
     model.cell_data['hsize'][0] = hsize
     return model
 
