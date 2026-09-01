@@ -162,7 +162,7 @@ class Domain(object):
                 if isinstance(boundary, pv.UnstructuredGrid):
                     boundary = boundary.extract_surface()
                 points, normals, n, d = read(boundary, **kwargs)
-                self.original_boundary = boundary
+                self.original_boundary = boundary.copy(deep=True)
                 self.points = points
                 self.normals = normals
                 self.n = n
@@ -764,6 +764,11 @@ class Domain(object):
                 self.boundary = self.original_boundary
             _, self.grid = contour(self.__call__, self.points, resolution)
         self.boundary = self.boundary.connectivity(extraction_mode='largest')
+        self._set_boundary_mesh(self.boundary)
+        return self.boundary, self.grid
+
+    def _set_boundary_mesh(self, boundary):
+        self.boundary = boundary.copy(deep=True)
         self.boundary = self.boundary.compute_cell_sizes()
         if self.points.shape[1] == 2:
             self.boundary.cell_data['Normalized_Length'] = (self.boundary.cell_data['Length'] /
@@ -777,7 +782,6 @@ class Domain(object):
             self.boundary_vertices = self.boundary.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
         else:
             raise ValueError("Only 2D and 3D domains are supported.")
-        return self.boundary, self.grid
 
     def get_interior(self, verbose=False, **kwargs):
         """
@@ -810,7 +814,15 @@ class Domain(object):
             self.area = _mesh.area
             self.volume = 0.0
         elif self.points.shape[1] == 3:
-            _mesh, nodes, vertices = tetrahedralize(self.boundary, order=1, nobisect=True, verbose=verbose, **kwargs)
+            tetgen_options = dict(kwargs)
+            tetgen_options["return_surface"] = True
+            _mesh, nodes, vertices, selected_surface = tetrahedralize(
+                self.boundary,
+                order=1,
+                nobisect=True,
+                verbose=verbose,
+                **tetgen_options,
+            )
             _mesh = _mesh.compute_cell_sizes()
             _mesh.cell_data['Normalized_Volume'] = (_mesh.cell_data['Volume'] / sum(_mesh.cell_data['Volume']))
             self.all_mesh_cells = np.arange(_mesh.n_cells, dtype=np.int64)
@@ -839,6 +851,7 @@ class Domain(object):
             delaunay = delaunay.delaunay_3d(offset=2*np.linalg.norm(np.max(self.points, axis=0) -
                                                                     np.min(self.points, axis=0)))
             self.convexity = self.mesh.volume / delaunay.volume
+            self._set_boundary_mesh(selected_surface)
         else:
             raise ValueError("Only 2D and 3D domains are supported.")
         return _mesh
