@@ -87,6 +87,75 @@ def _run_tetgen(surface_mesh):
     nodes, elems = tgen.tetrahedralize(verbose=0)
     return nodes, elems
 
+
+def _surface_component_count(surface: pv.PolyData) -> int:
+    connected = surface.connectivity()
+    if connected.n_cells == 0:
+        return 0
+    return int(np.max(connected.cell_data["RegionId"])) + 1
+
+
+def _repair_surface_with_meshfix(
+    surface: pv.PolyData,
+    max_distance_ratio: float,
+) -> pv.PolyData:
+    """Return a bounded, component-preserving repair of ``surface``."""
+    source = surface if isinstance(surface, pv.PolyData) else surface.extract_surface()
+    source = source.copy(deep=True)
+    if not source.is_all_triangles:
+        source = source.triangulate()
+    source_component_count = _surface_component_count(source)
+    source = source.clean(tolerance=0.0, absolute=True)
+    if _surface_component_count(source) != source_component_count:
+        raise ValueError("Surface cleaning changed the number of connected components")
+    if source.n_points == 0 or source.n_cells == 0:
+        raise ValueError("Cannot repair an empty surface")
+    if not np.isfinite(source.points).all():
+        raise ValueError("Surface points must be finite")
+    if not np.isfinite(max_distance_ratio) or max_distance_ratio <= 0:
+        raise ValueError("repair_max_distance_ratio must be positive and finite")
+
+    faces = np.asarray(source.faces).reshape(-1, 4)[:, 1:]
+    meshfix = pymeshfix.MeshFix(np.asarray(source.points), faces)
+    meshfix.repair(
+        verbose=False,
+        joincomp=False,
+        remove_smallest_components=False,
+    )
+    repaired_faces = np.column_stack(
+        (np.full(len(meshfix.f), 3, dtype=np.int64), np.asarray(meshfix.f))
+    )
+    repaired = pv.PolyData(np.asarray(meshfix.v), repaired_faces)
+
+    if (
+        repaired.n_points == 0
+        or repaired.n_cells == 0
+        or not np.isfinite(repaired.points).all()
+        or not repaired.is_all_triangles
+        or not repaired.is_manifold
+        or repaired.n_open_edges != 0
+    ):
+        raise ValueError("MeshFix did not produce a closed manifold triangle surface")
+    if _surface_component_count(repaired) != source_component_count:
+        raise ValueError("MeshFix changed the number of connected components")
+
+    bounds = np.asarray(source.bounds)
+    diagonal = np.linalg.norm(bounds[1::2] - bounds[::2])
+    allowed_distance = diagonal * float(max_distance_ratio)
+    distances = (
+        np.abs(source.compute_implicit_distance(repaired)["implicit_distance"]),
+        np.abs(repaired.compute_implicit_distance(source)["implicit_distance"]),
+    )
+    distance = max(float(values.max()) for values in distances if values.size)
+    if not np.isfinite(distance) or distance > allowed_distance:
+        raise ValueError(
+            "MeshFix changed the surface by {:.6g}; limit is {:.6g}".format(
+                distance,
+                allowed_distance,
+            )
+        )
+    return repaired
+
 def uniform_remesh_surface(surface: pv.PolyData,
                            *,
                            subdivisions: int = 3,
@@ -139,6 +208,14 @@ def _tetgen_worker_tetrahedralize(surface: pv.PolyData,
                                   tet_kwargs,
                                   worker_script: str,
                                   python_exe: str):
+    worker_script = os.path.abspath(worker_script)
+    if os.path.dirname(python_exe):
+        python_exe = os.path.abspath(python_exe)
+    tet_kwargs = dict(tet_kwargs)
+    background_mesh = tet_kwargs.get("bgmeshfilename")
+    if background_mesh:
+        tet_kwargs["bgmeshfilename"] = os.path.abspath(os.fspath(background_mesh))
+
     # On Windows, `tempfile` honors TMPDIR, which may be set to a POSIX-style
     # path such as '/tmp' and is not a valid directory there. Prefer the
     # standard TEMP/TMP locations when available to avoid spurious
@@ -175,6 +252,7 @@ def _tetgen_worker_tetrahedralize(surface: pv.PolyData,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,   # decode to strings
+            cwd=tmpdir,
         )
 
         show_spinner = sys.stdout.isatty()
@@ -279,10 +357,13 @@ def tetrahedralize(surface: pv.PolyData,
                    *tet_args,
                    worker_script: str = dirpath+os.sep+"tetgen_worker.py",
                    python_exe: str = sys.executable,
+                   repair_on_failure: bool = True,
+                   repair_max_distance_ratio: float = 0.01,
                    remesh_on_failure: bool = True,
                    remesh_subdivisions: int = 3,
                    remesh_clusters: int = 20000,
                    remesh_clean_tolerance: float = 1e-5,
+                   return_surface: bool = False,
                    **tet_kwargs):
     """
     Tetrahedralize a surface mesh using TetGen.
@@ -295,6 +376,11 @@ def tetrahedralize(surface: pv.PolyData,
         A flag to indicate if mesh fixing should be verbose.
     kwargs : dict
         A dictionary of keyword arguments to be passed to TetGen.
+    repair_on_failure : bool
+        If True, retry TetGen using a component-preserving MeshFix repair.
+    repair_max_distance_ratio : float
+        Maximum repair displacement as a fraction of the input bounding-box
+        diagonal.
     remesh_on_failure : bool
         If True, retry TetGen once using a PyACVD uniform isotropic remesh
         when the original surface fails to tetrahedralize.
@@ -304,6 +390,8 @@ def tetrahedralize(surface: pv.PolyData,
         Number of PyACVD clusters used by the retry path.
     remesh_clean_tolerance : float
         PyVista clean tolerance applied before and after PyACVD remeshing.
+    return_surface : bool
+        If True, append the surface accepted by TetGen to the return tuple.
 
     Returns
     -------
@@ -313,13 +401,46 @@ def tetrahedralize(surface: pv.PolyData,
     """
     tet_kwargs.setdefault("verbose", 0)
 
+    selected_surface = surface.copy(deep=True)
+    failures = []
+
+    def result(nodes, elems, selected):
+        output = _tetgen_grid_from_arrays(nodes, elems)
+        if return_surface:
+            return output + (selected.copy(deep=True),)
+        return output
+
     try:
         nodes, elems = _tetgen_worker_tetrahedralize(
             surface, tet_args, tet_kwargs, worker_script, python_exe
         )
     except RuntimeError as original_error:
+        failures.append(("Original TetGen error", original_error))
+
+        if repair_on_failure:
+            try:
+                repaired_surface = _repair_surface_with_meshfix(
+                    surface,
+                    repair_max_distance_ratio,
+                )
+                nodes, elems = _tetgen_worker_tetrahedralize(
+                    repaired_surface, tet_args, tet_kwargs, worker_script, python_exe
+                )
+            except Exception as repair_error:
+                failures.append(("MeshFix retry error", repair_error))
+            else:
+                return result(nodes, elems, repaired_surface)
+
         if not remesh_on_failure:
-            raise
+            if not repair_on_failure:
+                raise
+            details = "\n\n".join(
+                f"{label}:\n{error}" for label, error in failures
+            )
+            raise RuntimeError(
+                "TetGen failed after MeshFix surface repair.\n\n" + details
+            ) from failures[-1][1]
+
         try:
             remeshed_surface = uniform_remesh_surface(
                 surface,
@@ -327,22 +448,17 @@ def tetrahedralize(surface: pv.PolyData,
                 clusters=remesh_clusters,
                 clean_tolerance=remesh_clean_tolerance,
             )
-        except Exception as remesh_error:
-            raise RuntimeError(
-                "TetGen failed and uniform surface remeshing fallback failed.\n\n"
-                f"Original TetGen error:\n{original_error}\n\n"
-                f"Remeshing error:\n{remesh_error}"
-            ) from remesh_error
-
-        try:
             nodes, elems = _tetgen_worker_tetrahedralize(
                 remeshed_surface, tet_args, tet_kwargs, worker_script, python_exe
             )
-        except RuntimeError as retry_error:
+            selected_surface = remeshed_surface
+        except Exception as remesh_error:
+            failures.append(("PyACVD retry error", remesh_error))
+            details = "\n\n".join(
+                f"{label}:\n{error}" for label, error in failures
+            )
             raise RuntimeError(
-                "TetGen failed after PyACVD uniform surface remeshing fallback.\n\n"
-                f"Original TetGen error:\n{original_error}\n\n"
-                f"Retry TetGen error:\n{retry_error}"
-            ) from retry_error
+                "TetGen failed after surface recovery attempts.\n\n" + details
+            ) from remesh_error
 
-    return _tetgen_grid_from_arrays(nodes, elems)
+    return result(nodes, elems, selected_surface)
