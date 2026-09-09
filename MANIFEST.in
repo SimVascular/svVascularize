@@ -1,5 +1,6 @@
 include LICENSE
 include README.md
+include requirements.txt
 
 # Include all .pyx files
 recursive-include svv/utils/spatial *.pyx
@@ -20,6 +21,14 @@ recursive-include svv/utils/solvers/0D/Linux/aarch64 *
 recursive-include svv/utils/solvers/0D/Mac/universal2 *
 recursive-include svv/utils/solvers/0D/Mac/x86_64 *
 recursive-include svv/utils/solvers/0D/Windows/x86_64 *
+
+# Include TetGen CLI executables (arch-aware layout)
+recursive-include svv/utils/meshing/Linux/x86_64 *
+recursive-include svv/utils/meshing/Linux/aarch64 *
+recursive-include svv/utils/meshing/Mac/universal2 *
+recursive-include svv/utils/meshing/Mac/x86_64 *
+recursive-include svv/utils/meshing/Mac/aarch64 *
+recursive-include svv/utils/meshing/Windows/x86_64 *
 
 # Include locally-built tools (optional; used by some dev/CI flows)
 recursive-include svv/bin *

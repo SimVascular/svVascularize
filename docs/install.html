@@ -184,9 +184,25 @@ pip install svv</code></pre>
       <pre data-copy><code class="language-shell">git clone https://github.com/SimVascular/svVascularize.git
 cd svVascularize
 python -m pip install -e .[dev]</code></pre>
-      <p>To locally build and stage platform-specific MMG and 0D solver binaries into the package tree, run:</p>
+      <p>To locally build and stage platform-specific MMG, TetGen, and 0D solver binaries into the package tree, run:</p>
       <pre data-copy><code class="language-shell">python setup.py build_ext --inplace --build-native-binaries</code></pre>
-      <p>You can also build one tool at a time with <code>--build-mmg</code> or <code>--build-solver-0d</code>.</p>
+      <p>You can also build one tool at a time with <code>--build-mmg</code>, <code>--build-tetgen-cli</code>, or <code>--build-solver-0d</code>.</p>
+      <h3 id="tetgen-cli">TetGen for constrained tissue meshing</h3>
+      <p>Release wheels bundle the standalone <code>tetgen</code>/<code>tetgen.exe</code>
+        used by <em>Simulate → Build Constrained Tissue Mesh</em>. The Python
+        <code>tetgen</code> bindings used for ordinary meshing do not supply this executable.
+        Older wheels may omit it. Check the active installation with:</p>
+      <pre data-copy><code class="language-python">import svv
+from svv.utils.meshing.tetgen import get_packaged_tetgen_cli_path
+print(svv.__version__, svv.__file__)
+print(get_packaged_tetgen_cli_path())</code></pre>
+      <p>For a source installation, install CMake and a C++ compiler, then run these
+        commands from the source directory to build and install the executable:</p>
+      <pre data-copy><code class="language-shell">python setup.py build_ext --build-tetgen-cli --parallel 2
+python -m pip install .</code></pre>
+      <p>To use an existing executable, set <code>SVV_TETGEN_PATH</code> to its full
+        path before launching the GUI. A <code>tetgen</code> executable on
+        <code>PATH</code> is also supported.</p>
     </section>
 
     <!-- SOLVERS -->

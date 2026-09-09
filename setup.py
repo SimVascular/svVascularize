@@ -528,6 +528,8 @@ def build_tetgen_cli(num_cores=None):
     os.makedirs(wrapper_dir_tetgen, exist_ok=True)
     _write_tetgen_cli_cmakelists(os.path.join(wrapper_dir_tetgen, "CMakeLists.txt"))
 
+    os_dir = _tetgen_os_dir()
+    arch_dir = _tetgen_arch_dir(os_dir)
     cmake_cmd = ["cmake", "-Wno-dev", "-Wno-deprecated"]
     if platform.system().lower().startswith("win"):
         vs_generator = pick_visual_studio_generator()
@@ -535,6 +537,12 @@ def build_tetgen_cli(num_cores=None):
             cmake_cmd += ["-G", vs_generator]
         else:
             print("No suitable Visual Studio found, falling back to default generator or NMake.")
+    elif os_dir == "Mac":
+        cmake_arch = {"aarch64": "arm64", "universal2": "arm64;x86_64"}.get(arch_dir, arch_dir)
+        cmake_cmd += [f"-DCMAKE_OSX_ARCHITECTURES={cmake_arch}"]
+        deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "").strip()
+        if deployment_target:
+            cmake_cmd += [f"-DCMAKE_OSX_DEPLOYMENT_TARGET={deployment_target}"]
 
     cmake_cmd += [
         "-DCMAKE_BUILD_TYPE=Release",
@@ -561,8 +569,6 @@ def build_tetgen_cli(num_cores=None):
     except subprocess.CalledProcessError as e:
         raise RuntimeError("CMake build failed for TetGen CLI.") from e
 
-    os_dir = _tetgen_os_dir()
-    arch_dir = _tetgen_arch_dir(os_dir)
     install_prefix = os.path.abspath(os.path.join("svv", "utils", "meshing", os_dir, arch_dir))
     os.makedirs(install_prefix, exist_ok=True)
     install_cmd = [
@@ -840,10 +846,7 @@ class DownloadAndBuildExt(build_ext):
                 print(f"Warning: MMG build failed ({e}). Continuing without building MMG.")
 
         if build_tetgen_cli_flag:
-            try:
-                build_tetgen_cli(num_cores=num_cores)
-            except Exception as e:
-                print(f"Warning: TetGen CLI build failed ({e}). Continuing without building TetGen CLI.")
+            build_tetgen_cli(num_cores=self.parallel or num_cores)
 
         if build_0d_flag:
             try:
@@ -1062,7 +1065,7 @@ def _tetgen_package_patterns() -> list:
     os_dir = _tetgen_os_dir()
     arch_dir = _tetgen_arch_dir(os_dir)
 
-    if env_flag("SVV_REQUIRE_TETGEN_CLI", False):
+    if env_flag("SVV_REQUIRE_TETGEN_CLI", False) and "--build-tetgen-cli" not in sys.argv:
         repo_root = Path(__file__).resolve().parent
         base = repo_root / "svv" / "utils" / "meshing" / os_dir / arch_dir
         missing = [n for n in _tetgen_expected_filenames(os_dir, arch_dir) if not (base / n).is_file()]

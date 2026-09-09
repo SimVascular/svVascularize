@@ -167,10 +167,14 @@
       <li><strong>File:</strong> Open domain, Save start-point configuration (JSON), Save Domain (<code>.dmn</code>), Save Tree/Forest (<code>.tree</code>/<code>.forest</code>).</li>
       <li><strong>View:</strong> camera presets, visibility toggles, show/hide panels and toolbars, save/reset layout.</li>
       <li><strong>Fabricate:</strong> export centerlines/solids/splines for CAD, meshing, or fabrication workflows.</li>
-      <li><strong>Simulate:</strong> export 0D/3D simulation setup files; open the Solution Inspector.</li>
+      <li><strong>Simulate:</strong> build a constrained tissue mesh, export 0D/3D simulation setup files, or open the Solution Inspector.</li>
     </ul>
 
     <h2 id="workflow">Typical Workflow</h2>
+    <p><strong>Build Constrained Tissue Mesh</strong> uses the standalone TetGen executable
+      bundled with release wheels to retain sampled centerline points as mesh nodes.
+      For an older wheel or a source installation reporting a missing executable,
+      follow the <a href="install.html#tetgen-cli">TetGen installation guidance</a>.</p>
     <ol>
       <li><strong>Load a domain:</strong> <em>File → Open</em> to load a domain/mesh.</li>
       <li><strong>Add start points:</strong> open the <em>Start Points</em> tab and pick points on the domain (and optional directions).</li>

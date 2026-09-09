@@ -77,16 +77,23 @@ jobs:
             python .github/scripts/build_0d.py --version 3.0 --arch x86_64 --jobs 2
           fi
 
+      - name: Build TetGen CLI
+        env:
+          SVV_TETGEN_ARCH: ${{ runner.os == 'macOS' && 'universal2' || '' }}
+        run: python setup.py build_ext --build-tetgen-cli --parallel 2
+
       - name: Install svVascularize
         env:
           SVV_REQUIRE_MMG: "1"
           SVV_REQUIRE_SOLVER_0D: "1"
+          SVV_REQUIRE_TETGEN_CLI: "1"
           SVV_MMG_ARCH: ${{ runner.os == 'macOS' && 'universal2' || '' }}
           SVV_SOLVER_0D_ARCH: ${{ runner.os == 'macOS' && 'universal2' || '' }}
+          SVV_TETGEN_ARCH: ${{ runner.os == 'macOS' && 'universal2' || '' }}
         run: |
           python -m pip install .
 
-      - name: Verify MMG executables are installed
+      - name: Verify packaged executables are installed
         run: |
           python - << 'PY'
           import os
@@ -99,6 +106,7 @@ jobs:
 
           from svv.utils.remeshing.mmg import get_mmg_exe
           from svv.utils.solvers.solver_0d import get_solver_0d_exe
+          from svv.utils.meshing.tetgen import get_packaged_tetgen_cli_path
 
           for tool in ("mmg2d", "mmg3d", "mmgs"):
             exe = get_mmg_exe(tool)
@@ -130,6 +138,12 @@ jobs:
             check=False,
           )
           print(f"svzerodsolver -h exit: {proc.returncode}", flush=True)
+
+          tetgen = get_packaged_tetgen_cli_path()
+          if tetgen is None:
+              raise RuntimeError("Packaged TetGen executable is missing")
+          print("TetGen selected:", tetgen, flush=True)
+          subprocess.run([tetgen, "-h"], check=True, timeout=10)
           PY
 
       - name: Run basic smoke test
