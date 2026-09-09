@@ -95,13 +95,12 @@ jobs:
 
       - name: Verify packaged executables are installed
         run: |
-          python - << 'PY'
+          python -I - << 'PY'
           import os
           import subprocess
           import tempfile
 
-          # Ensure we validate the *installed* package, not the repo checkout
-          # (stdin execution puts the current working directory on sys.path).
+          # Isolated mode excludes the checkout from imports on every platform.
           os.chdir(tempfile.mkdtemp(prefix="svv-mmg-verify-"))
 
           from svv.utils.remeshing.mmg import get_mmg_exe

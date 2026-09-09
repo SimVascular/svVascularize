@@ -477,6 +477,7 @@ def _write_tetgen_cli_cmakelists(cmake_path: str) -> None:
 
             if(MSVC)
               target_compile_definitions(tetgen PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+              set_property(TARGET tetgen PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
             endif()
 
             install(TARGETS tetgen RUNTIME DESTINATION .)

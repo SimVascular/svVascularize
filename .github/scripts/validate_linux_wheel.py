@@ -106,7 +106,7 @@ def _validation_command(wheel_basename: str) -> str:
         f"{_python_selector()}; "
         '"$PYTHON_BIN" -m pip install -U pip; '
         f'"$PYTHON_BIN" -m pip install --no-deps /dist/{shlex.quote(wheel_basename)}; '
-        f'"$PYTHON_BIN" -c {shlex.quote(validation_py)}'
+        f'"$PYTHON_BIN" -I -c {shlex.quote(validation_py)}'
     )
 
 

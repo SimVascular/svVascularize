@@ -71,7 +71,7 @@ jobs:
           python -m pip install -U pip
           wheel=$(ls dist/svv-*.whl | head -n 1)
           python -m pip install --no-deps "$wheel"
-          python - <<'PY'
+          python -I - <<'PY'
           import os
           import subprocess
           import tempfile
@@ -131,7 +131,7 @@ jobs:
           python -m pip install -U pip
           wheel=$(ls dist/svv-*win_amd64.whl | head -n 1)
           python -m pip install --no-deps "$wheel"
-          python - <<'PY'
+          python -I - <<'PY'
           import os
           import subprocess
           import tempfile
