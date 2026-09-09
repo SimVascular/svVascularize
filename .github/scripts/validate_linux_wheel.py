@@ -87,6 +87,7 @@ def _validation_command(wheel_basename: str) -> str:
         "os.chdir(tempfile.mkdtemp(prefix='svv-wheel-validate-')); "
         "from svv.utils.remeshing.mmg import get_mmg_exe; "
         "from svv.utils.solvers.solver_0d import get_solver_0d_exe; "
+        "from svv.utils.meshing.tetgen import get_packaged_tetgen_cli_path; "
         "exe = get_mmg_exe('mmgs'); "
         "print('MMG selected:', exe); "
         "proc = subprocess.run([str(exe), '-h'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False); "
@@ -94,14 +95,18 @@ def _validation_command(wheel_basename: str) -> str:
         "solver_0d = get_solver_0d_exe(); "
         "print('0D solver selected:', solver_0d); "
         "proc = subprocess.run([str(solver_0d), '-h'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False); "
-        "print('svzerodsolver -h exit:', proc.returncode)"
+        "print('svzerodsolver -h exit:', proc.returncode); "
+        "tetgen = get_packaged_tetgen_cli_path(); "
+        "assert tetgen is not None, 'Packaged TetGen executable is missing'; "
+        "print('TetGen selected:', tetgen); "
+        "subprocess.run([tetgen, '-h'], check=True, timeout=10)"
     )
     return (
         "set -eu; "
         f"{_python_selector()}; "
         '"$PYTHON_BIN" -m pip install -U pip; '
         f'"$PYTHON_BIN" -m pip install --no-deps /dist/{shlex.quote(wheel_basename)}; '
-        f'"$PYTHON_BIN" -c {shlex.quote(validation_py)}'
+        f'"$PYTHON_BIN" -I -c {shlex.quote(validation_py)}'
     )
 
 

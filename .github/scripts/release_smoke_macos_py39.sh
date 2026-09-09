@@ -16,7 +16,7 @@ fi
 # Force TetGen to resolve from a wheel during the release smoke test.
 python -m pip install --only-binary=tetgen "${wheel}"
 
-python - <<'PY'
+python -I - <<'PY'
 import importlib.metadata as md
 import os
 import tempfile
