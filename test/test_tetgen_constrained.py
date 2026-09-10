@@ -117,7 +117,7 @@ def test_tetrahedralize_with_prescribed_points_uses_exact_insertion_switches(mon
         verify_tol=1e-6,
     )
 
-    assert captured["switches"] == ["pq1.1/10.0Q", "riJMQ"]
+    assert captured["switches"] == ["pq1.1/10.0YQ", "riJMQ"]
     assert np.allclose(captured["written_points"], prescribed_points[:2])
     assert meta["line_count"] == 1
     assert meta["original_point_count"] == 3
@@ -141,3 +141,30 @@ def test_tetrahedralize_with_prescribed_points_uses_exact_insertion_switches(mon
     assert np.allclose(grid.point_data["centerline_radius"][:2], [0.1, 0.1])
     assert nodes.shape == (4, 3)
     assert elems.shape == (1, 4)
+
+
+def test_tetrahedralize_with_prescribed_points_preserves_surface_boundary():
+    scale = 1.0
+    try:
+        tetgen_exe = constrained_mod.resolve_tetgen_exe()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    surface = pv.Box(bounds=(-scale, scale) * 3).triangulate().clean()
+    prescribed_points = np.array([[0.125, 0.25, 0.375]]) * scale
+    grid, nodes, elems, meta = constrained_mod.tetrahedralize_with_prescribed_points(
+        surface, prescribed_points, tetgen_exe=tetgen_exe,
+    )
+
+    boundary = grid.extract_surface()
+    assert boundary.n_points == surface.n_points
+    surface_ids = np.array([surface.find_closest_point(point) for point in boundary.points])
+    np.testing.assert_array_equal(boundary.points, surface.points[surface_ids])
+    actual_faces = surface_ids[boundary.faces.reshape(-1, 4)[:, 1:]]
+    expected_faces = surface.faces.reshape(-1, 4)[:, 1:]
+    assert {tuple(sorted(face)) for face in actual_faces} == {
+        tuple(sorted(face)) for face in expected_faces
+    }
+    np.testing.assert_array_equal(nodes[meta["node_ids"]], prescribed_points)
+    assert np.isin(meta["node_ids"], elems).all()
+

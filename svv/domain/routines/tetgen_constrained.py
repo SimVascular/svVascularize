@@ -342,7 +342,8 @@ def tetrahedralize_with_prescribed_points(
         poly_path = tmpdir_path / f"{base_name}.poly"
         write_poly(surface, poly_path)
 
-        run_tetgen(exe, f"p{quality_switches}Q", poly_path.name, tmpdir)
+        # Preserve the input boundary to avoid TetGen facet-merging failures.
+        run_tetgen(exe, f"p{quality_switches}YQ", poly_path.name, tmpdir)
 
         insert_path = tmpdir_path / f"{base_name}.1.a.node"
         write_a_node(filtered_points, insert_path)
