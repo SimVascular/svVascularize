@@ -143,8 +143,8 @@ def test_tetrahedralize_with_prescribed_points_uses_exact_insertion_switches(mon
     assert elems.shape == (1, 4)
 
 
-def test_tetrahedralize_with_prescribed_points_preserves_surface_boundary():
-    scale = 1.0
+@pytest.mark.parametrize("scale", [1.0, 100.0])
+def test_tetrahedralize_with_prescribed_points_preserves_surface_boundary(scale):
     try:
         tetgen_exe = constrained_mod.resolve_tetgen_exe()
     except RuntimeError as exc:
@@ -168,3 +168,34 @@ def test_tetrahedralize_with_prescribed_points_preserves_surface_boundary():
     np.testing.assert_array_equal(nodes[meta["node_ids"]], prescribed_points)
     assert np.isin(meta["node_ids"], elems).all()
 
+
+@pytest.mark.parametrize("distribution", ["across_concavity", "insertion_flips"])
+def test_tetrahedralize_with_prescribed_points_connects_points_in_nonconvex_domain(distribution):
+    try:
+        tetgen_exe = constrained_mod.resolve_tetgen_exe()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    # A U-shaped domain requires retrying point searches across its concavity.
+    voxels = pv.ImageData(dimensions=(7, 7, 2), spacing=(0.1, 0.1, 0.1))
+    centers = voxels.cell_centers().points
+    keep = (centers[:, 0] < 0.1) | (centers[:, 0] > 0.5) | (centers[:, 1] < 0.1)
+    domain = voxels.extract_cells(np.flatnonzero(keep))
+    surface = domain.extract_surface().triangulate().clean()
+    centers = domain.cell_centers().points
+    if distribution == "insertion_flips":
+        # These insertions delete a tetrahedron retained by the next point search.
+        rng = np.random.default_rng(29)
+        ids = rng.integers(0, len(centers), 1000)
+        points = centers[ids] + rng.uniform(-0.045, 0.045, (1000, 3))
+    else:
+        rng = np.random.default_rng(32)
+        points = (centers[:, None, :] + rng.uniform(-0.04, 0.04, (len(centers), 8, 3))).reshape(-1, 3)
+
+    _, nodes, elems, meta = constrained_mod.tetrahedralize_with_prescribed_points(
+        surface, points, tetgen_exe=tetgen_exe,
+    )
+
+    assert meta["retained_point_count"] == len(points)
+    np.testing.assert_array_equal(nodes[meta["node_ids"]], points)
+    assert np.isin(meta["node_ids"], elems).all()
