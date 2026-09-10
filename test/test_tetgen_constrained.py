@@ -199,3 +199,52 @@ def test_tetrahedralize_with_prescribed_points_connects_points_in_nonconvex_doma
     assert meta["retained_point_count"] == len(points)
     np.testing.assert_array_equal(nodes[meta["node_ids"]], points)
     assert np.isin(meta["node_ids"], elems).all()
+
+
+def test_tetrahedralize_with_prescribed_points_rejects_unused_output_nodes(monkeypatch):
+    nodes = np.array([
+        [0.0, 0.0, 0.0],  # Present in .node, but unused by every tetrahedron.
+        [-0.5, -0.5, -0.5],
+        [0.5, -0.5, -0.5],
+        [0.0, 0.5, -0.5],
+        [0.0, 0.0, 0.5],
+    ])
+    monkeypatch.setattr(constrained_mod, "resolve_tetgen_exe", lambda tetgen_exe=None: "/tmp/tetgen")
+    monkeypatch.setattr(constrained_mod, "run_tetgen", lambda *args: None)
+    monkeypatch.setattr(constrained_mod, "read_node", lambda path: (nodes, {}))
+    monkeypatch.setattr(constrained_mod, "read_ele", lambda path, index_map: np.array([[1, 2, 3, 4]]))
+
+    with pytest.raises(RuntimeError, match="does not contain all prescribed spline points"):
+        constrained_mod.tetrahedralize_with_prescribed_points(_surface(), nodes[:1])
+
+
+@pytest.mark.parametrize("points", [
+    [[0.125, 0.25, -1.0 + 1e-14], [0.0, 0.0, 0.0]],
+    [[0.0, 0.0, -1.0]],  # Shared edge of two coplanar triangles.
+    [[1.0, 0.0, -1.0]],  # Edge between different surface facets.
+    [[1.0, 1.0, -1.0]],  # Existing surface vertex.
+    [[0.125, 0.25, -1.0], [0.2, 0.4, -1.0], [0.125, 0.25, -1.0]],
+])
+def test_tetrahedralize_connects_boundary_constraints_without_moving_them(points):
+    try:
+        tetgen_exe = constrained_mod.resolve_tetgen_exe()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    surface = pv.Box().triangulate().clean()
+    points = np.asarray(points, dtype=float)
+    grid, nodes, elems, meta = constrained_mod.tetrahedralize_with_prescribed_points(
+        surface, points, tetgen_exe=tetgen_exe,
+    )
+
+    assert meta["retained_point_count"] == len(points)
+    np.testing.assert_array_equal(nodes[meta["node_ids"]], points)
+    assert np.isin(meta["node_ids"], elems).all()
+    boundary = grid.extract_surface()
+    assert boundary.n_open_edges == 0
+    boundary_points = points[np.isclose(points[:, 2], -1.0)]
+    constrained_mod.verify_prescribed_points(boundary.points, boundary_points, 1e-12)
+    x = nodes[elems]
+    volumes = np.linalg.det(x[:, 1:] - x[:, :1]) / 6.0
+    assert (volumes > 0).all()
+    assert np.isclose(volumes.sum(), 8.0, rtol=1e-12, atol=1e-12)
