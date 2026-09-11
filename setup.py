@@ -454,6 +454,45 @@ def _find_tetgen_cli_source_dir(source_extract_root: str) -> str:
     )
 
 
+def _patch_tetgen_cli_source(source_dir: str) -> None:
+    """Correct point-location defects in the pinned TetGen v0.8.3 sources."""
+    source_path = Path(source_dir) / "src" / "tetgen.cxx"
+    source = source_path.read_text(encoding="utf-8")
+    replacements = (
+        # randomsample compares squared distances; a linear bound can leave
+        # searchtet null for interior points at larger coordinate scales.
+        ("    searchdist = longest;", "    searchdist = longest * longest;"),
+        # Retry failed walks across a nonconvex mesh, up to the existing limit.
+        (
+            "    if (iter < maxiter) break;\n  } while (loc != OUTSIDE);",
+            "    if (iter >= maxiter) break;\n  } while (loc == OUTSIDE);",
+        ),
+        # Insertion flips may deallocate the previous search tetrahedron.
+        # Clear its handle before choosing another starting tetrahedron.
+        (
+            "    // 'searchtet' must be a valid tetrahedron.\n"
+            "    if (searchtet->tet == NULL) {",
+            "    // 'searchtet' must be a valid tetrahedron.\n"
+            "    if (isdeadtet(*searchtet)) {\n"
+            "      searchtet->tet = NULL;",
+        ),
+        (
+            "      if ((recenttet.tet != NULL) && !ishulltet(recenttet)) {",
+            "      if (!isdeadtet(recenttet) && !ishulltet(recenttet)) {",
+        ),
+    )
+    for old, new in replacements:
+        if source.count(new) == 1:
+            continue  # A previous build attempt already applied this patch.
+        if source.count(old) != 1:
+            raise RuntimeError(
+                f"Cannot apply TetGen point-location fix to {source_path}: "
+                "unexpected source version."
+            )
+        source = source.replace(old, new, 1)
+    source_path.write_text(source, encoding="utf-8")
+
+
 def _write_tetgen_cli_cmakelists(cmake_path: str) -> None:
     Path(cmake_path).write_text(
         dedent(
@@ -520,6 +559,7 @@ def build_tetgen_cli(num_cores=None):
         raise RuntimeError("Error extracting TetGen CLI archive.") from e
 
     tetgen_source_dir = _find_tetgen_cli_source_dir(source_extract_root)
+    _patch_tetgen_cli_source(tetgen_source_dir)
 
     if os.path.isdir(build_dir_tetgen):
         shutil.rmtree(build_dir_tetgen, ignore_errors=True)

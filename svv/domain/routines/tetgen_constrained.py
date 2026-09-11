@@ -9,6 +9,7 @@ import pyvista as pv
 from scipy.spatial import cKDTree
 
 from svv.utils.meshing.tetgen import get_packaged_tetgen_cli_path
+from svv.domain.routines.tetrahedral_repair import recover_prescribed_points, repair_degenerate_tetrahedra
 
 
 def resolve_tetgen_exe(tetgen_exe=None):
@@ -144,6 +145,60 @@ def _relative_enclosure_tolerance(surface, verify_tol):
     return min(max(rel_tol * 10.0, 1e-12), 1e-4)
 
 
+def _boundary_roundoff_tolerance(surface, verify_tol):
+    scale = max(surface.length, float(np.abs(surface.bounds).max()))
+    return min(max(float(verify_tol), 0.0), 64 * np.finfo(float).eps * scale)
+
+
+def _boundary_point_mask(surface, points, verify_tol):
+    _, closest = surface.find_closest_cell(points, return_closest_point=True)
+    return np.linalg.norm(points - closest, axis=1) <= _boundary_roundoff_tolerance(surface, verify_tol)
+
+
+def _embed_boundary_points(surface, points, verify_tol):
+    """Make boundary constraints surface vertices without moving their coordinates."""
+    surface = surface.extract_surface().triangulate().clean()
+    boundary_mask = _boundary_point_mask(surface, points, verify_tol)
+    tol = _boundary_roundoff_tolerance(surface, verify_tol)
+    for point in points[boundary_mask]:
+        vertices = np.asarray(surface.points, dtype=float)
+        if np.linalg.norm(vertices - point, axis=1).min() <= tol:
+            continue  # Reuse an existing vertex, including repeated constraints.
+
+        cell_id = surface.find_closest_cell(point)
+        faces = surface.faces.reshape(-1, 4)[:, 1:]
+        tri = faces[cell_id]
+        a = vertices[tri]
+        b = np.roll(a, -1, axis=0)
+        edges = b - a
+        fractions = np.clip(np.einsum("ij,ij->i", point - a, edges)
+                            / np.einsum("ij,ij->i", edges, edges), 0.0, 1.0)
+        edge_distances = np.linalg.norm(point - (a + fractions[:, None] * edges), axis=1)
+        point_id = len(vertices)
+        new_faces = []
+        if edge_distances.min() <= tol:
+            edge_id = int(edge_distances.argmin())
+            edge = {int(tri[edge_id]), int(tri[(edge_id + 1) % 3])}
+            # Split every incident triangle, including across noncoplanar facets.
+            affected = np.flatnonzero(np.isin(faces, list(edge)).sum(axis=1) == 2)
+            for face in faces[affected]:
+                for i in range(3):
+                    u, v, w = np.roll(face, -i)
+                    if {int(u), int(v)} == edge:
+                        new_faces.extend([[u, point_id, w], [point_id, v, w]])
+                        break
+        else:
+            affected = [cell_id]
+            u, v, w = tri
+            new_faces = [[u, v, point_id], [v, w, point_id], [w, u, point_id]]
+
+        faces = np.vstack([np.delete(faces, affected, axis=0), new_faces])
+        vertices = np.vstack([vertices, point])
+        surface = pv.PolyData(vertices, np.column_stack([np.full(len(faces), 3), faces]))
+
+    return surface, np.flatnonzero(~boundary_mask)
+
+
 def filter_prescribed_points_to_surface(
     surface,
     prescribed_points,
@@ -180,6 +235,9 @@ def filter_prescribed_points_to_surface(
         check_surface=True,
     )
     inside_mask = np.asarray(selected["SelectedPoints"]).reshape(-1).astype(bool)
+    # A point on a facet is a boundary constraint even if ray casting classifies
+    # it as outside. Only roundoff-level distances qualify; do not move points.
+    inside_mask |= _boundary_point_mask(surface_mesh, prescribed_points, verify_tol)
     kept_point_ids = np.flatnonzero(inside_mask)
     dropped_point_ids = np.flatnonzero(~inside_mask)
 
@@ -335,6 +393,7 @@ def tetrahedralize_with_prescribed_points(
     exe = resolve_tetgen_exe(tetgen_exe)
     order_switch = "o2" if int(order) == 2 else ""
     quality_switches = f"q{minratio}/{mindihedral}{order_switch}"
+    surface, interior_point_ids = _embed_boundary_points(surface, filtered_points, verify_tol)
 
     with tempfile.TemporaryDirectory(prefix="svv_tetgen_constraints_") as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -342,17 +401,28 @@ def tetrahedralize_with_prescribed_points(
         poly_path = tmpdir_path / f"{base_name}.poly"
         write_poly(surface, poly_path)
 
-        run_tetgen(exe, f"p{quality_switches}Q", poly_path.name, tmpdir)
+        # Preserve the input boundary to avoid TetGen facet-merging failures.
+        run_tetgen(exe, f"p{quality_switches}YQ", poly_path.name, tmpdir)
 
-        insert_path = tmpdir_path / f"{base_name}.1.a.node"
-        write_a_node(filtered_points, insert_path)
-        run_tetgen(exe, f"ri{order_switch}JMQ", f"{base_name}.1", tmpdir)
+        output_stem = f"{base_name}.1"
+        if interior_point_ids.size:
+            insert_path = tmpdir_path / f"{output_stem}.a.node"
+            write_a_node(filtered_points[interior_point_ids], insert_path)
+            run_tetgen(exe, f"ri{order_switch}JMQ", output_stem, tmpdir)
+            output_stem = f"{base_name}.2"
 
-        node_path = tmpdir_path / f"{base_name}.2.node"
-        ele_path = tmpdir_path / f"{base_name}.2.ele"
+        node_path = tmpdir_path / f"{output_stem}.node"
+        ele_path = tmpdir_path / f"{output_stem}.ele"
         nodes, index_map = read_node(node_path)
         elems = read_ele(ele_path, index_map)
 
+    nodes, elems = recover_prescribed_points(nodes, elems, filtered_points, verify_tol)
+    before_quality_repair = elems
+    nodes, elems = repair_degenerate_tetrahedra(nodes, elems)
+    if elems is not before_quality_repair:
+        # Geometry repair can enable a previously rejected point insertion or
+        # disconnect an old quadratic midpoint. Recover both before verification.
+        nodes, elems = recover_prescribed_points(nodes, elems, filtered_points, verify_tol)
     n_cells, n_vertices_per_cell = elems.shape
     cells = np.hstack(
         [
@@ -363,7 +433,10 @@ def tetrahedralize_with_prescribed_points(
     celltypes = _cell_types(n_vertices_per_cell, n_cells)
     grid = pv.UnstructuredGrid(cells, celltypes, nodes)
 
-    node_ids, distances = verify_prescribed_points(nodes, filtered_points, verify_tol)
+    # -J also writes unused input nodes; constraints must belong to elements.
+    used_node_ids = np.unique(elems)
+    node_ids, distances = verify_prescribed_points(nodes[used_node_ids], filtered_points, verify_tol)
+    node_ids = used_node_ids[node_ids]
     unique_node_count = np.unique(node_ids).shape[0]
     max_assignment_distance = float(distances.max()) if distances.size else 0.0
 
@@ -388,6 +461,7 @@ def tetrahedralize_with_prescribed_points(
         "dropped_point_count": int(dropped_point_ids.shape[0]),
         "dropped_point_ids": dropped_point_ids.tolist(),
         "unique_node_count": int(unique_node_count),
+        "boundary_point_count": int(len(filtered_points) - len(interior_point_ids)),
         "max_assignment_distance": max_assignment_distance,
         "insertion_switches": f"ri{order_switch}JMQ",
     }
