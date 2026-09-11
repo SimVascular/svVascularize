@@ -9,7 +9,7 @@ import pyvista as pv
 from scipy.spatial import cKDTree
 
 from svv.utils.meshing.tetgen import get_packaged_tetgen_cli_path
-from svv.domain.routines.tetrahedral_repair import recover_prescribed_points
+from svv.domain.routines.tetrahedral_repair import recover_prescribed_points, repair_degenerate_tetrahedra
 
 
 def resolve_tetgen_exe(tetgen_exe=None):
@@ -417,6 +417,12 @@ def tetrahedralize_with_prescribed_points(
         elems = read_ele(ele_path, index_map)
 
     nodes, elems = recover_prescribed_points(nodes, elems, filtered_points, verify_tol)
+    before_quality_repair = elems
+    nodes, elems = repair_degenerate_tetrahedra(nodes, elems)
+    if elems is not before_quality_repair:
+        # Geometry repair can enable a previously rejected point insertion or
+        # disconnect an old quadratic midpoint. Recover both before verification.
+        nodes, elems = recover_prescribed_points(nodes, elems, filtered_points, verify_tol)
     n_cells, n_vertices_per_cell = elems.shape
     cells = np.hstack(
         [

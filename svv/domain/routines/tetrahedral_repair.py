@@ -1,6 +1,7 @@
 """Local tetrahedron repairs that preserve prescribed coordinates."""
 
 from fractions import Fraction
+from itertools import combinations
 
 import numpy as np
 import pyvista as pv
@@ -140,3 +141,90 @@ def recover_prescribed_points(nodes, elems, points, tol):
                 continue
             nodes, elems = _replace_cells(updated_nodes, elems, affected, children)
             break
+
+
+def _bad_tetrahedra(nodes, elems):
+    quality = _scaled_jacobians(nodes, elems)
+    x = nodes[elems[:, :4]]
+    determinants = np.linalg.det(x[:, 1:] - x[:, :1])
+    return np.flatnonzero(~np.isfinite(quality) | (quality < _MIN_SCALED_JACOBIAN)
+                         | ~np.isfinite(determinants) | (determinants <= 0))
+
+
+def _collinear_cavity(nodes, elems, cell_id):
+    """Replace a nearly collinear face by an interior point's conforming star."""
+    for triple in combinations(elems[cell_id, :4], 3):
+        ids = np.asarray(triple)
+        pairs = np.array([[0, 1], [0, 2], [1, 2]])
+        lengths = np.linalg.norm(nodes[ids[pairs[:, 1]]] - nodes[ids[pairs[:, 0]]], axis=1)
+        if lengths.max() == 0 or len(np.unique(ids)) != 3:
+            continue
+        ends = ids[pairs[lengths.argmax()]]
+        middle = int(ids[~np.isin(ids, ends)][0])
+        edge = nodes[ends[1]] - nodes[ends[0]]
+        offset = nodes[middle] - nodes[ends[0]]
+        fraction = np.dot(offset, edge) / np.dot(edge, edge)
+        scale = max(float(np.abs(nodes[ids]).max()), float(lengths.max()))
+        distance = np.linalg.norm(np.cross(offset, edge)) / lengths.max()
+        if not 0 < fraction < 1 or distance > 64 * np.finfo(float).eps * scale:
+            continue
+
+        # Include every interior sample along the spanning edge. Overlapping
+        # collinear triples must be repaired together, or their shared faces
+        # can leave a newly coned cell nearly flat or inverted.
+        corners = elems[:, :4]
+        used = np.unique(corners)
+        offsets = nodes[used] - nodes[ends[0]]
+        fractions = offsets @ edge / np.dot(edge, edge)
+        distances = np.linalg.norm(np.cross(offsets, edge), axis=1) / lengths.max()
+        interior = used[(fractions > 0) & (fractions < 1)
+                        & ~np.isin(used, ends)
+                        & (distances <= 64 * np.finfo(float).eps * scale)]
+        affected = np.flatnonzero(np.isin(corners, interior).any(axis=1)
+                                 | (np.isin(corners, ends).sum(axis=1) == 2))
+        boundary = _cavity_boundary(corners[affected])
+        if np.isin(boundary, interior).any():
+            continue  # Keep the tissue boundary, including its triangulation.
+        children = np.column_stack([np.full(len(boundary), middle), boundary])
+        orientations = [_orientation(nodes[child]) for child in children]
+        if not orientations or any(value <= 0 for value in orientations):
+            continue  # The point must see every cavity face from the inside.
+        if sum(orientations) != sum(_orientation(nodes[parent]) for parent in corners[affected]):
+            continue
+        omitted = np.setdiff1d(np.unique(corners[affected]), np.unique(children))
+        if len(omitted):
+            # Reuse the original node ids and coordinates while splitting the
+            # new cavity consistently along the remaining samples.
+            _, children = recover_prescribed_points(nodes, children, nodes[omitted], tol=0.0)
+        if not np.array_equal(np.unique(children), np.unique(corners[affected])):
+            continue
+        return _replace_cells(nodes, elems, affected, children)
+    return None
+
+
+def repair_degenerate_tetrahedra(nodes, elems):
+    """Repair numerically flat cells after insertion without moving mesh nodes.
+
+    Every candidate has positive exact orientation and conserved cavity volume.
+    Overlapping defects may need several steps, each reducing the bad-cell count.
+    Return only once all cells have positive floating-point volume and usable
+    scaled Jacobians. Unsupported cavities remain explicit errors.
+    """
+    bad = _bad_tetrahedra(nodes, elems)
+    while len(bad):
+        for cell_id in bad:
+            repaired = _collinear_cavity(nodes, elems, cell_id)
+            if repaired is None:
+                continue
+            updated_nodes, updated_elems = repaired
+            remaining = _bad_tetrahedra(updated_nodes, updated_elems)
+            if len(remaining) >= len(bad):
+                continue
+            nodes, elems, bad = updated_nodes, updated_elems, remaining
+            break
+        else:
+            raise RuntimeError(
+                "TetGen output contains near-degenerate tetrahedra that cannot be repaired "
+                f"while preserving mesh coordinates and boundary faces. Cell ids: {bad[:20].tolist()}."
+            )
+    return nodes, elems
