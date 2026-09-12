@@ -887,7 +887,7 @@ class VascularizeGUI(QMainWindow):
 
         self.build_constrained_tissue_mesh_action = QAction("Build Constrained Tissue Mesh...", self)
         self.build_constrained_tissue_mesh_action.setStatusTip(
-            "Build a spline-constrained tissue mesh and preview the tissue surface in the viewport"
+            "Choose an output file, build and save a spline-constrained tissue mesh, and preview its surface"
         )
         self.build_constrained_tissue_mesh_action.triggered.connect(self.build_constrained_tissue_mesh_dialog)
         simulate_menu.addAction(self.build_constrained_tissue_mesh_action)
@@ -1460,6 +1460,20 @@ class VascularizeGUI(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
 
+        is_forest = isinstance(obj, _svv_forest_mod.Forest)
+        suffix = "vtm" if is_forest else "vtu"
+        file_filter = "VTK MultiBlock (*.vtm)" if is_forest else "VTK Unstructured Grid (*.vtu)"
+        save_dialog = QFileDialog(
+            self, "Save Constrained Tissue Mesh", f"constrained_tissue_mesh.{suffix}", file_filter,
+        )
+        save_dialog.setAcceptMode(QFileDialog.AcceptSave)
+        save_dialog.setFileMode(QFileDialog.AnyFile)
+        save_dialog.setDefaultSuffix(suffix)
+        if save_dialog.exec() != QDialog.Accepted:
+            return
+        file_path = save_dialog.selectedFiles()[0]
+
+        operation = "build"
         try:
             self.show_progress("Building constrained tissue mesh...")
             QApplication.processEvents()
@@ -1469,21 +1483,31 @@ class VascularizeGUI(QMainWindow):
                 tolerance=float(tolerance_spin.value()),
                 show_overlay=overlay_cb.isChecked(),
             )
+
+            operation = "save"
+            self.show_progress("Saving constrained tissue mesh...")
+            import pyvista as pv
+
+            output_mesh = pv.MultiBlock(volume_meshes) if is_forest else volume_meshes[0]
+            # VTK writers can report I/O errors without raising from save().
+            with pv.VtkErrorCatcher(raise_errors=True):
+                output_mesh.save(file_path)
+
             total_cells = sum(int(getattr(mesh, "n_cells", 0)) for mesh in volume_meshes)
             meta = getattr(sim, "tissue_constraint_metadata", None) or []
             self.log_output(
-                f"[3D] built constrained tissue mesh with {len(volume_meshes)} volume mesh(es), "
+                f"[3D] saved constrained tissue mesh to {file_path} with {len(volume_meshes)} volume mesh(es), "
                 f"{total_cells} cells, sample points per vessel={sample_spin.value()}, "
                 f"constraint metadata={meta}"
             )
-            self.update_status("Constrained tissue mesh built")
+            self.update_status(f"Constrained tissue mesh saved to {file_path}")
         except Exception as e:
-            self._record_telemetry(e, action="build_constrained_tissue_mesh")
-            self.update_status("Constrained tissue mesh build failed")
+            self._record_telemetry(e, action=f"{operation}_constrained_tissue_mesh")
+            self.update_status(f"Constrained tissue mesh {operation} failed")
             QMessageBox.critical(
                 self,
-                "Build Constrained Tissue Mesh Failed",
-                f"Failed to build the constrained tissue mesh:\n\n{e}"
+                f"{operation.capitalize()} Constrained Tissue Mesh Failed",
+                f"Failed to {operation} the constrained tissue mesh:\n\n{e}"
             )
         finally:
             self.hide_progress()
