@@ -9,7 +9,7 @@ import numpy as np
 from scipy.interpolate import splprep, splev
 
 from svv.forest.export.export_spline import export_spline
-from svv.tree.export.write_splines import get_interpolated_sv_data
+from svv.tree.export.write_splines import get_interpolated_sv_data, get_branches, get_lengths
 
 
 @dataclass(frozen=True)
@@ -267,9 +267,12 @@ def _write_tree_splines(tree, dst: Path, *, spline_sample_points: int, separate:
     data = getattr(tree, "data", None)
     if data is None:
         raise ValueError("Tree has no data to export.")
-    *_, interp_xyzr, lengths = get_interpolated_sv_data(data)
+    *_, interp_xyzr = get_interpolated_sv_data(data)
     if not interp_xyzr:
         raise ValueError("Tree has no spline branches to export.")
+
+    branches = get_branches(data)
+    lengths = get_lengths(data, branches)
 
     _ensure_parent(dst)
     with dst.open("w", encoding="utf-8") as spline_file:
@@ -281,7 +284,7 @@ def _write_tree_splines(tree, dst: Path, *, spline_sample_points: int, separate:
             _write_samples(
                 spline_file,
                 data,
-                spline_sample_points=spline_sample_points,
+                num_points=num_points,
                 separate=separate,
             )
             spline_file.write("\n")
@@ -310,7 +313,7 @@ def _write_connected_spline_file(
             _write_samples(
                 spline_file,
                 data,
-                spline_sample_points=spline_sample_points,
+                num_points=num_points,
                 separate=separate,
             )
             spline_file.write("\n")

@@ -256,26 +256,32 @@ def get_interpolated_sv_data(data):
             #interp_n.append(splprep(n, s=0))
     return interp_xyz, interp_r, interp_n, path_frames, branches, interp_xyzr
 
-def write_splines(interp_xyzr, spline_sample_points=100, write_splines=True, outdir=None):
+
+def write_splines(data, interp_xyzr, spline_sample_points=100, write_splines=True, outdir=None):
     tree_splines = []
     if write_splines:
+        branches = get_branches(data)
+        lengths = get_lengths(data, branches)
+
         target_dir = Path(outdir) if outdir is not None else Path(os.getcwd())
         target_dir.mkdir(parents=True, exist_ok=True)
         spline_path = target_dir / "tree_b_splines.txt"
         spline_file = open(spline_path, "w+", encoding="utf-8")
+
     for vessel in range(len(interp_xyzr)):
         def vessel_spline(t, ctr=interp_xyzr[vessel]):
             return splev(t, ctr[0])
         tree_splines.append(deepcopy(vessel_spline))
+
         if write_splines:
-            *_, branches, interp_xyzr = get_interpolated_sv_data(data)
-            lengths = get_lengths(data, branches)
             num_points = max(2, int(round(lengths[vessel] * spline_sample_points)) + 1)
             spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, num_points))
             t = np.linspace(0, 1, num=num_points)
-            data = deepcopy(vessel_spline(t))
+
+            spline_data = deepcopy(vessel_spline(t))
             for k in range(num_points):
-                spline_file.write('{}, {}, {}, {}\n'.format(data[0][k], data[1][k], data[2][k], data[3][k]))
+                spline_file.write('{}, {}, {}, {}\n'.format(spline_data[0][k], spline_data[1][k], spline_data[2][k],
+                                                            spline_data[3][k]))
             spline_file.write('\n')
     if write_splines:
         spline_file.close()
