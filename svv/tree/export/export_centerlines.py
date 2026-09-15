@@ -473,7 +473,7 @@ def build_centerlines(tree, points_per_unit_length=100):
     for ind in range(1, len(polys)):
         # Find closest point in already-merged polys using KD-tree
         closest_pt_id = find_closest_in_merged(polys[ind].points[0], ind)
-        centerlines_all = centerlines_all.merge(polys[ind], merge_points=False)
+        centerlines_all = centerlines_all.append_polydata(polys[ind])
         # The first point of polys[ind] is at cumulative_points[ind] in merged mesh
         closest_next_id = cumulative_points[ind]
         new_line = [2, closest_pt_id, closest_next_id]
