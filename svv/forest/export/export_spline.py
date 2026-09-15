@@ -203,6 +203,10 @@ def write_splines(ALL_POINTS, ALL_RADII, spline_sample_points=100, seperate=Fals
                 for vessel in range(len(ALL_POINTS[network])):
                     pt_array = np.array(ALL_POINTS[network][vessel])
                     r_array = np.array(ALL_RADII[network][vessel]).reshape(-1, 1)
+                    diffs = np.diff(pt_array, axis=0)
+                    vessel_length = np.sum(np.linalg.norm(diffs, axis=1))
+                    num_points = max(2, int(round(vessel_length * spline_sample_points)) + 1)
+
                     pt_r_combined = deepcopy(np.hstack((pt_array, r_array)).T)
                     vessel_ctr = splprep(pt_r_combined, s=0)
 
@@ -210,11 +214,11 @@ def write_splines(ALL_POINTS, ALL_RADII, spline_sample_points=100, seperate=Fals
                         return splev(t, ctr[0])
 
                     network_splines.append(deepcopy(vessel_spline))
-                    spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, spline_sample_points))
-                    t = np.linspace(0, 1, num=spline_sample_points)
+                    spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, num_points))
+                    t = np.linspace(0, 1, num=num_points)
                     data = deepcopy(vessel_spline(t))
-                    for k in range(spline_sample_points):
-                        label = 1 if k > spline_sample_points // 2 else 0
+                    for k in range(num_points):
+                        label = 1 if k > num_points // 2 else 0
                         if seperate:
                             spline_file.write(
                                 '{}, {}, {}, {}, {}\n'.format(
