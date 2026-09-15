@@ -793,6 +793,7 @@ class Tree(object):
     def export_splines(self, spline_sample_points=100, write_splines=True, outdir=None):
         interp_xyz, interp_r, interp_n, path_frames, branches, interp_xyzr = get_interpolated_sv_data(self.data)
         splines = write_tree_splines(
+            self.data,
             interp_xyzr,
             spline_sample_points=spline_sample_points,
             write_splines=write_splines,
