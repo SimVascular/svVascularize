@@ -201,11 +201,20 @@ def get_normals(data, branches):
     return path_normals
 
 
+def get_lengths(data, branches):
+    branch_lengths = []
+    for path in branches:
+        length = sum(data[edge, 20] for edge in path)
+        branch_lengths.append(length)
+    return branch_lengths
+
+
 def get_interpolated_sv_data(data):
     branches = get_branches(data)
     points = get_points(data, branches)
     radii = get_radii(data, branches)
     normals = get_normals(data, branches)
+    lengths = get_lengths(data, branches)
     path_frames = []
     for idx in range(len(branches)):
         frames = []
@@ -245,9 +254,9 @@ def get_interpolated_sv_data(data):
             xyzr = numpy.vstack((p, r))
             interp_xyzr.append(splprep(xyzr, s=0))
             #interp_n.append(splprep(n, s=0))
-    return interp_xyz, interp_r, interp_n, path_frames, branches, interp_xyzr
+    return interp_xyz, interp_r, interp_n, path_frames, branches, interp_xyzr, lengths
 
-def write_splines(interp_xyzr, spline_sample_points=100, write_splines=True, outdir=None):
+def write_splines(interp_xyzr, branch_lengths, spline_sample_points=100, write_splines=True, outdir=None):
     tree_splines = []
     if write_splines:
         target_dir = Path(outdir) if outdir is not None else Path(os.getcwd())
@@ -259,10 +268,11 @@ def write_splines(interp_xyzr, spline_sample_points=100, write_splines=True, out
             return splev(t, ctr[0])
         tree_splines.append(deepcopy(vessel_spline))
         if write_splines:
-            spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, spline_sample_points))
-            t = np.linspace(0, 1, num=spline_sample_points)
+            num_points = max(2, int(round(branch_lengths[vessel] * spline_sample_points)) + 1)
+            spline_file.write('Vessel: {}, Number of Points: {}\n\n'.format(vessel, num_points))
+            t = np.linspace(0, 1, num=num_points)
             data = deepcopy(vessel_spline(t))
-            for k in range(spline_sample_points):
+            for k in range(num_points):
                 spline_file.write('{}, {}, {}, {}\n'.format(data[0][k], data[1][k], data[2][k], data[3][k]))
             spline_file.write('\n')
     if write_splines:
