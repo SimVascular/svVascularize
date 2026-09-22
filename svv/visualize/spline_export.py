@@ -9,7 +9,7 @@ import numpy as np
 from scipy.interpolate import splprep, splev
 
 from svv.forest.export.export_spline import export_spline
-from svv.tree.export.write_splines import get_interpolated_sv_data
+from svv.tree.export.write_splines import get_interpolated_sv_data, get_branches, get_lengths
 
 
 @dataclass(frozen=True)
@@ -271,16 +271,20 @@ def _write_tree_splines(tree, dst: Path, *, spline_sample_points: int, separate:
     if not interp_xyzr:
         raise ValueError("Tree has no spline branches to export.")
 
+    branches = get_branches(data)
+    lengths = get_lengths(data, branches)
+
     _ensure_parent(dst)
-    t = np.linspace(0, 1, num=spline_sample_points)
     with dst.open("w", encoding="utf-8") as spline_file:
         for vessel_idx, vessel_ctr in enumerate(interp_xyzr):
-            spline_file.write(f"Vessel: {vessel_idx}, Number of Points: {spline_sample_points}\n\n")
+            num_points = max(2, int(round(lengths[vessel_idx] * spline_sample_points)) + 1)
+            spline_file.write(f"Vessel: {vessel_idx}, Number of Points: {num_points}\n\n")
+            t = np.linspace(0, 1, num=num_points)
             data = splev(t, vessel_ctr[0])
             _write_samples(
                 spline_file,
                 data,
-                spline_sample_points=spline_sample_points,
+                num_points=num_points,
                 separate=separate,
             )
             spline_file.write("\n")
@@ -295,28 +299,31 @@ def _write_connected_spline_file(
     separate: bool,
 ) -> None:
     _ensure_parent(dst)
-    t = np.linspace(0, 1, num=spline_sample_points)
     with dst.open("w", encoding="utf-8") as spline_file:
         for vessel_idx, (points, radii) in enumerate(zip(all_points, all_radii)):
             pt_array = np.asarray(points)
             r_array = np.asarray(radii).reshape(-1, 1)
+            diffs = np.diff(pt_array, axis=0)
+            vessel_length = np.sum(np.linalg.norm(diffs, axis=1))
+            num_points = max(2, int(round(vessel_length * spline_sample_points)) + 1)
             vessel_ctr = splprep(np.hstack((pt_array, r_array)).T, s=0)
-            spline_file.write(f"Vessel: {vessel_idx}, Number of Points: {spline_sample_points}\n\n")
+            spline_file.write(f"Vessel: {vessel_idx}, Number of Points: {num_points}\n\n")
+            t = np.linspace(0, 1, num=num_points)
             data = splev(t, vessel_ctr[0])
             _write_samples(
                 spline_file,
                 data,
-                spline_sample_points=spline_sample_points,
+                num_points=num_points,
                 separate=separate,
             )
             spline_file.write("\n")
 
 
-def _write_samples(spline_file, data, *, spline_sample_points: int, separate: bool) -> None:
-    for sample_idx in range(spline_sample_points):
+def _write_samples(spline_file, data, *, num_points: int, separate: bool) -> None:
+    for sample_idx in range(num_points):
         row = [data[0][sample_idx], data[1][sample_idx], data[2][sample_idx], data[3][sample_idx]]
         if separate:
-            row.append(1 if sample_idx > spline_sample_points // 2 else 0)
+            row.append(1 if sample_idx >= (num_points + 1) // 2 else 0)
         spline_file.write(", ".join(str(value) for value in row))
         spline_file.write("\n")
 

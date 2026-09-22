@@ -23,8 +23,15 @@ def flatten_spline_functions(splines):
 
 def sample_spline_functions(splines, spline_sample_points=100):
     """Sample spline callables into point and line constraints."""
-    if spline_sample_points < 2:
-        raise ValueError("spline_sample_points must be at least 2.")
+    if (
+            isinstance(spline_sample_points, (bool, np.bool_))
+            or not isinstance(spline_sample_points, (int, np.integer))
+            or spline_sample_points < 2
+    ):
+        raise ValueError(
+            "spline_sample_points must be a positive integer "
+            "representing samples per unit length."
+        )
 
     flat_splines = flatten_spline_functions(splines)
     if not flat_splines:
@@ -44,7 +51,14 @@ def sample_spline_functions(splines, spline_sample_points=100):
     point_offset = 0
 
     for spline_id, spline in enumerate(flat_splines):
-        t = np.linspace(0.0, 1.0, num=spline_sample_points)
+        probe = spline(np.linspace(0.0, 1.0, num=100))
+        probe_coords = np.column_stack(probe[:3])
+        spline_length = np.sum(
+            np.linalg.norm(np.diff(probe_coords, axis=0), axis=1)
+        )
+
+        num_points = max(2, int(round(spline_length * spline_sample_points)) + 1)
+        t = np.linspace(0.0, 1.0, num=num_points)
         data = spline(t)
         coords = np.column_stack(
             (

@@ -1438,7 +1438,7 @@ class VascularizeGUI(QMainWindow):
         sample_spin.setRange(2, 10000)
         sample_spin.setValue(100)
         sample_spin.setToolTip("Number of sampled spline points per vessel used as constrained nodes.")
-        form.addRow("Sample points per vessel:", sample_spin)
+        form.addRow("Sample points per unit length:", sample_spin)
 
         tolerance_spin = QDoubleSpinBox()
         tolerance_spin.setDecimals(8)
@@ -1497,7 +1497,7 @@ class VascularizeGUI(QMainWindow):
             meta = getattr(sim, "tissue_constraint_metadata", None) or []
             self.log_output(
                 f"[3D] saved constrained tissue mesh to {file_path} with {len(volume_meshes)} volume mesh(es), "
-                f"{total_cells} cells, sample points per vessel={sample_spin.value()}, "
+                f"{total_cells} cells, sample points per length={sample_spin.value()}, "
                 f"constraint metadata={meta}"
             )
             self.update_status(f"Constrained tissue mesh saved to {file_path}")
@@ -2539,8 +2539,8 @@ class VascularizeGUI(QMainWindow):
         sample_spin = QSpinBox()
         sample_spin.setRange(10, 10000)
         sample_spin.setValue(100)
-        sample_spin.setToolTip("Number of sample points per vessel spline.")
-        form.addRow("Sample points per vessel:", sample_spin)
+        sample_spin.setToolTip("Number of sample points per unit length spline.")
+        form.addRow("Sample points per unit length:", sample_spin)
 
         seperate_cb = QCheckBox("Separate inlet/outlet labeling")
         seperate_cb.setChecked(False)
