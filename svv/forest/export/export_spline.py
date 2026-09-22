@@ -218,7 +218,7 @@ def write_splines(ALL_POINTS, ALL_RADII, spline_sample_points=100, seperate=Fals
                     t = np.linspace(0, 1, num=num_points)
                     data = deepcopy(vessel_spline(t))
                     for k in range(num_points):
-                        label = 1 if k > num_points // 2 else 0
+                        label = 1 if k >= (num_points + 1) // 2 else 0
                         if seperate:
                             spline_file.write(
                                 '{}, {}, {}, {}, {}\n'.format(
