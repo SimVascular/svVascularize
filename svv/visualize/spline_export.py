@@ -323,7 +323,7 @@ def _write_samples(spline_file, data, *, num_points: int, separate: bool) -> Non
     for sample_idx in range(num_points):
         row = [data[0][sample_idx], data[1][sample_idx], data[2][sample_idx], data[3][sample_idx]]
         if separate:
-            row.append(1 if sample_idx > num_points // 2 else 0)
+            row.append(1 if sample_idx >= (num_points + 1) // 2 else 0)
         spline_file.write(", ".join(str(value) for value in row))
         spline_file.write("\n")
 
