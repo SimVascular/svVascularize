@@ -203,9 +203,12 @@ def get_normals(data, branches):
 
 def get_lengths(data, branches):
     branch_lengths = []
-    for path in branches:
-        length = sum(data[edge, 20] for edge in path)
-        branch_lengths.append(length)
+    for branch_idx, path in enumerate(branches):
+        if branch_idx == 0:
+            edges = path
+        else:
+            edges = path[1:]
+        branch_lengths.append(sum(data[edge, 20] for edge in edges))
     return branch_lengths
 
 
